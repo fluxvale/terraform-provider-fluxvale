@@ -1,0 +1,3 @@
+# `go build .` drops the provider binary here (dev_overrides loop) —
+# keep it out of git; every sibling app carries one of these.
+/terraform-provider-fluxvale
