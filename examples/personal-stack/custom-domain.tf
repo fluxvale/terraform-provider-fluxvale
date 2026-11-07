@@ -1,7 +1,3 @@
-# Restore to custom-domain.tf once #548 merges — the provider then
-# registers the fluxvale_custom_domain type this file needs (until
-# then, the committed example validates against the registered set).
-
 resource "fluxvale_custom_domain" "personal" {
   domain = var.custom_domain
 

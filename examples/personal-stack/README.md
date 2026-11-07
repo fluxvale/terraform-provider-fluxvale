@@ -19,10 +19,8 @@ plan/apply/destroy against the owner's real organization.
   interpolation — endpoint composed from the account id, bucket from
   `cloudflare_r2_bucket.backups.name`, keys from vars, per-instance
   prefixes. This composition is the point of the example.
-- **The custom domain** — pending until #548 merges: the resource
-  lives in `custom-domain.tf.example`; restore it to
-  `custom-domain.tf` once the provider registers the type (the file's
-  header says so).
+- **The custom domain** — declared in `custom-domain.tf`; the
+  provider registers `fluxvale_custom_domain`.
 
 App identity flows through the catalog data sources:
 `fluxvale_apps` guards the slugs exist; `fluxvale_app_versions`
@@ -66,7 +64,6 @@ traffic until that lands.
 - `secret_access_key` is write-only (set ⇒ rotated on every save); the
   R2 keys are account-level credentials minted in the Cloudflare
   dashboard — no TF resource manages them.
-- The custom domain arrives as `custom-domain.tf.example` — the
-  provider doesn't register `fluxvale_custom_domain` until #548
-  merges; restore the file then (its header says so). The `verified
-  is NOT resolution` section below applies once it's live.
+- The custom domain is declared in `custom-domain.tf` (live since
+  #548 merged). The `verified is NOT resolution` section below
+  applies to it.
