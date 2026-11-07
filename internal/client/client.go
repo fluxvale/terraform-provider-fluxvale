@@ -79,10 +79,17 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("fluxvale API: status %d: %s", e.Status, strings.Join(msgs, "; "))
 }
 
-// Document is a JSON:API document. Includes, links, and relationships
-// stay untyped until a resource slice needs them.
+// Document is a JSON:API document whose data is one resource.
+// Includes, links, and relationships stay untyped until a slice needs
+// them.
 type Document struct {
 	Data   Resource      `json:"data"`
+	Errors []ErrorObject `json:"errors,omitempty"`
+}
+
+// ListDocument is a JSON:API document whose data is a collection.
+type ListDocument struct {
+	Data   []Resource    `json:"data"`
 	Errors []ErrorObject `json:"errors,omitempty"`
 }
 
@@ -94,22 +101,50 @@ type Resource struct {
 	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
-// Do performs an API call and decodes the JSON:API response document.
-// A nil body is a plain request (GET). Non-2xx responses decode the
-// JSON:API errors array into an *APIError.
+// Do performs an API call and decodes a single-resource JSON:API
+// document. A nil body is a plain request (GET). Non-2xx responses
+// decode the JSON:API errors array into an *APIError.
 func (c *Client) Do(ctx context.Context, method, path string, body any) (Document, error) {
+	resBody, err := c.send(ctx, method, path, body)
+	if err != nil {
+		return Document{}, err
+	}
+	var doc Document
+	if err := json.Unmarshal(resBody, &doc); err != nil {
+		return Document{}, fmt.Errorf("decoding response from %s %s: %w", method, path, err)
+	}
+	return doc, nil
+}
+
+// DoList is Do for collection documents ({"data": […]}).
+func (c *Client) DoList(ctx context.Context, method, path string, body any) (ListDocument, error) {
+	resBody, err := c.send(ctx, method, path, body)
+	if err != nil {
+		return ListDocument{}, err
+	}
+	var doc ListDocument
+	if err := json.Unmarshal(resBody, &doc); err != nil {
+		return ListDocument{}, fmt.Errorf("decoding response from %s %s: %w", method, path, err)
+	}
+	return doc, nil
+}
+
+// send performs the call and returns the raw response body — the one
+// transport path Do and DoList decode over. Non-2xx bodies become an
+// *APIError.
+func (c *Client) send(ctx context.Context, method, path string, body any) ([]byte, error) {
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
-			return Document{}, fmt.Errorf("encoding request body: %w", err)
+			return nil, fmt.Errorf("encoding request body: %w", err)
 		}
 		reader = bytes.NewReader(buf)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
 	if err != nil {
-		return Document{}, fmt.Errorf("building request: %w", err)
+		return nil, fmt.Errorf("building request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", contentTypeJSONAPI)
@@ -120,24 +155,19 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (Documen
 
 	res, err := c.http.Do(req)
 	if err != nil {
-		return Document{}, fmt.Errorf("calling %s %s: %w", method, path, err)
+		return nil, fmt.Errorf("calling %s %s: %w", method, path, err)
 	}
 	defer res.Body.Close()
 
 	resBody, err := io.ReadAll(res.Body)
 	if err != nil {
-		return Document{}, fmt.Errorf("reading response from %s %s: %w", method, path, err)
+		return nil, fmt.Errorf("reading response from %s %s: %w", method, path, err)
 	}
 
 	if res.StatusCode >= http.StatusBadRequest {
-		return Document{}, decodeAPIError(res.StatusCode, resBody)
+		return nil, decodeAPIError(res.StatusCode, resBody)
 	}
-
-	var doc Document
-	if err := json.Unmarshal(resBody, &doc); err != nil {
-		return Document{}, fmt.Errorf("decoding response from %s %s: %w", method, path, err)
-	}
-	return doc, nil
+	return resBody, nil
 }
 
 // Me is the authenticated user from GET /api/v1/me — the provider's

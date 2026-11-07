@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/fluxvale/fluxvale/apps/tfprovider/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -45,13 +46,19 @@ func New(version string) func() provider.Provider {
 }
 
 // providerData is what Configure hands to every resource and data
-// source: the authenticated client plus the pinged identity. Resources
-// and data sources land in follow-up slices (#482).
+// source: the authenticated client, the pinged identity, and the
+// poll pacing for async lifecycles (deploy wait, teardown wait).
 type providerData struct {
 	client       *client.Client
 	userID       string
 	userEmail    string
 	organization types.String
+
+	// Poll pacing for the async lifecycles. Configure sets the
+	// production values (10s interval, 10m deadline — the deploy and
+	// teardown Oban jobs); tests shorten both.
+	pollInterval time.Duration
+	pollTimeout  time.Duration
 }
 
 func (p *fluxvaleProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -74,7 +81,7 @@ func (p *fluxvaleProvider) Schema(ctx context.Context, req provider.SchemaReques
 			},
 			"organization": schema.StringAttribute{
 				Optional:    true,
-				Description: "Default organization for resources that need one. Resolution lands with the resource slices.",
+				Description: "Default organization for resources that need one — its id or slug. A resource's own \"organization\" attribute wins over this; with neither set, resources fall back to your sole organization.",
 			},
 		},
 	}
@@ -141,21 +148,25 @@ func (p *fluxvaleProvider) Configure(ctx context.Context, req provider.Configure
 		userID:       me.ID,
 		userEmail:    me.Email,
 		organization: config.Organization,
+		pollInterval: 10 * time.Second,
+		pollTimeout:  10 * time.Minute,
 	}
 	resp.ResourceData = data
 	resp.DataSourceData = data
 }
 
-// Resources returns empty this slice — resources land in follow-up
-// slices (#482).
+// Resources returns the provider's resource set.
 func (p *fluxvaleProvider) Resources(ctx context.Context) []func() resource.Resource {
-	return nil
+	return []func() resource.Resource{
+		NewInstanceResource,
+		NewBackupsResource,
+		NewGatewayResource,
+	}
 }
 
-// DataSources returns empty this slice — data sources land in
-// follow-up slices (#482).
+// DataSources returns the provider's data-source set.
 func (p *fluxvaleProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return nil
+	return []func() datasource.DataSource{NewAppsDataSource, NewAppVersionsDataSource}
 }
 
 // stringValue returns a config string only if set AND known. Values
