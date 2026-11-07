@@ -673,7 +673,7 @@ func TestGatewayImportConverges(t *testing.T) {
 		d.OrganizationID = imported.OrganizationID
 		d.TailnetDomain = imported.TailnetDomain
 		d.Hostname = imported.Hostname
-		d.Provider = imported.Provider
+		d.AccessProvider = imported.AccessProvider
 		d.State = imported.State
 		d.StatusMessage = imported.StatusMessage
 		d.MonthlyCents = imported.MonthlyCents
@@ -843,7 +843,7 @@ func TestGatewaySchemaContract(t *testing.T) {
 
 	want := []string{
 		"organization", "tailnet_domain", "auth_key", "instances",
-		"id", "organization_id", "hostname", "provider", "state",
+		"id", "organization_id", "hostname", "access_provider", "state",
 		"status_message", "monthly_cents", "provisioned_at",
 	}
 	if len(sch.Attributes) != len(want) {

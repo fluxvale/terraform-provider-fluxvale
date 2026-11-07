@@ -431,7 +431,7 @@ func testGateway(mutators ...func(*gatewayModel)) gatewayModel {
 		ID:             types.StringNull(),
 		OrganizationID: types.StringNull(),
 		Hostname:       types.StringNull(),
-		Provider:       types.StringNull(),
+		AccessProvider: types.StringNull(),
 		State:          types.StringNull(),
 		StatusMessage:  types.StringNull(),
 		MonthlyCents:   types.Int64Null(),

@@ -56,7 +56,7 @@ type gatewayModel struct {
 	ID             types.String `tfsdk:"id"`
 	OrganizationID types.String `tfsdk:"organization_id"`
 	Hostname       types.String `tfsdk:"hostname"`
-	Provider       types.String `tfsdk:"provider"`
+	AccessProvider types.String `tfsdk:"access_provider"`
 	State          types.String `tfsdk:"state"`
 	StatusMessage  types.String `tfsdk:"status_message"`
 	MonthlyCents   types.Int64  `tfsdk:"monthly_cents"`
@@ -124,9 +124,9 @@ func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Computed:    true,
 				Description: "The opaque fv-<8 hex> node name — minted at create, never derived from org or app names.",
 			},
-			"provider": schema.StringAttribute{
+			"access_provider": schema.StringAttribute{
 				Computed:    true,
-				Description: "The access provider (tailscale).",
+				Description: "The access provider (tailscale) — the API field is `provider`, reserved in Terraform schemas, so the attribute is `access_provider`.",
 			},
 			"state": schema.StringAttribute{
 				Computed: true,
@@ -416,7 +416,7 @@ func waitGatewayActive(ctx context.Context, pd *providerData, orgID string, diag
 // null organization — the import-convergence seed. A config-set value
 // (slug or id) is kept verbatim: it already resolved at create/read.
 func seedOrganization(data *gatewayModel, orgID string) {
-	if data.Organization.IsNull() {
+	if data.Organization.IsNull() || data.Organization.IsUnknown() {
 		data.Organization = types.StringValue(orgID)
 	}
 }
@@ -459,7 +459,7 @@ func mapGateway(data *gatewayModel, gw client.AccessGateway) {
 	data.OrganizationID = types.StringValue(gw.OrganizationID)
 	data.Hostname = types.StringValue(gw.Hostname)
 	data.TailnetDomain = types.StringValue(gw.TailnetDomain)
-	data.Provider = types.StringValue(gw.Provider)
+	data.AccessProvider = types.StringValue(gw.Provider)
 	data.State = types.StringValue(gw.State)
 	data.StatusMessage = types.StringPointerValue(gw.StatusMessage)
 	data.MonthlyCents = types.Int64Value(gw.MonthlyCents)
