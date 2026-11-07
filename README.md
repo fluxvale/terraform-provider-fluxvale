@@ -151,6 +151,12 @@ The provider needs a FluxVale personal access token (`fvpat_…`):
 Configure pings `/api/v1/me` (scopeless — any live token works), so a
 dead token fails at plan time with the server's wording.
 
+## Installing
+
+Manual-first (ADR-0019 Am. 4): release zips into a local filesystem
+mirror — the copy-paste recipe lives in
+[docs/install.md](docs/install.md).
+
 ## Dev loop (dev_overrides)
 
 The registry isn't live yet; use [dev_overrides](https://developer.hashicorp.com/terraform/plugin/debug-vendor):
@@ -190,4 +196,14 @@ Or run it debugger-attached: `go run . -debug` and follow the printed
 ## CI
 
 Path-gated lane in `.github/workflows/ci.yml` (`tfprovider`): gofmt +
-vet + test + build, Go version parsed from the root `mise.toml` pin.
+vet + test + build (Go parsed from the root `mise.toml` pin), the
+release-tag gate's fixture test, and the **real-tofu smoke** — a real
+OpenTofu CLI driving the real compiled binary (plan → apply → destroy
+against a fake API, `TFPROVIDER_E2E=1`; skipped without it). It catches
+what in-process tests cannot: it was this gate that caught the
+reserved-`provider` root attribute and the plan-time-unknown
+organization seed. Releases: tag `tf-v*` →
+`.github/workflows/tfprovider-release.yml` (registry-shaped zips,
+checksums, GitHub Release; dispatch is the dry run). Acceptance
+against a real org: nightly/dispatch/tag lane in
+`.github/workflows/tfprovider-acceptance.yml` — never per-PR.

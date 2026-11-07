@@ -885,3 +885,29 @@ func TestGatewaySchemaContract(t *testing.T) {
 		t.Errorf("TypeName = %q, want fluxvale_access_gateway", md.TypeName)
 	}
 }
+
+// The seed must treat UNKNOWN as unset: a real CLI plans an
+// Optional+Computed attribute the config leaves off as unknown, and an
+// unknown value cannot ride state out of apply (the real-tofu gate
+// caught exactly this — the in-process create tests craft nulls).
+func TestGatewaySeedOrganizationUnknown(t *testing.T) {
+	cases := []struct {
+		name string
+		in   types.String
+		want string
+	}{
+		{"null seeds", types.StringNull(), "org-1"},
+		{"unknown seeds", types.StringUnknown(), "org-1"},
+		{"config value kept verbatim", types.StringValue("acme"), "acme"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data := testGateway()
+			data.Organization = tc.in
+			seedOrganization(&data, "org-1")
+			if data.Organization.ValueString() != tc.want {
+				t.Errorf("organization = %q, want %q", data.Organization.ValueString(), tc.want)
+			}
+		})
+	}
+}

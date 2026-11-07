@@ -1,0 +1,23 @@
+# Copy to terraform.tfvars and replace every placeholder — the PA
+# collects the owner's real values (#482 acceptance). Secrets can stay
+# OUT of this file entirely: FLUXVALE_PAT (environment) is the
+# preferred FluxVale credential, and nothing here is committed.
+
+api_url               = "https://staging.fluxvale.com" # rehearsal first; production is the default
+fluxvale_pat          = null                           # leave null — export FLUXVALE_PAT instead
+
+cloudflare_api_token  = "REPLACE_ME_CLOUDFLARE_API_TOKEN"
+cloudflare_account_id = "REPLACE_ME_CLOUDFLARE_ACCOUNT_ID"
+r2_bucket_name        = "fluxvale-backups"
+r2_access_key_id      = "REPLACE_ME_R2_ACCESS_KEY_ID"
+r2_secret_access_key  = "REPLACE_ME_R2_SECRET_ACCESS_KEY"
+
+public_app_slug       = "forgejo"              # must exist in the catalog
+public_app_version    = "REPLACE_ME_VERSION"   # a version string from fluxvale_app_versions
+private_app_slug      = "memos"                # must exist in the catalog
+private_app_version   = "REPLACE_ME_VERSION"
+
+tailnet_domain        = "REPLACE-ME.ts.net"    # your tailnet's MagicDNS suffix
+tailscale_auth_key    = "REPLACE_ME_TAILSCALE_AUTH_KEY"
+
+custom_domain         = "REPLACE-ME.example.com" # e.g. apps.yourdomain.com

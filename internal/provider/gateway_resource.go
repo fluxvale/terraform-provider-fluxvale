@@ -413,8 +413,12 @@ func waitGatewayActive(ctx context.Context, pd *providerData, orgID string, diag
 }
 
 // seedOrganization writes the org the resolution actually used into a
-// null organization — the import-convergence seed. A config-set value
-// (slug or id) is kept verbatim: it already resolved at create/read.
+// config-unset organization — the import-convergence seed. Unknown
+// counts as unset: a real CLI plans an Optional+Computed attribute the
+// config leaves off as UNKNOWN (the in-process tests craft nulls —
+// only the real-tofu gate catches the difference), and an unknown
+// value cannot ride state out of apply. A config-set value (slug or
+// id) is kept verbatim: it already resolved at create/read.
 func seedOrganization(data *gatewayModel, orgID string) {
 	if data.Organization.IsNull() || data.Organization.IsUnknown() {
 		data.Organization = types.StringValue(orgID)

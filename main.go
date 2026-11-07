@@ -6,28 +6,34 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 
 	"github.com/fluxvale/fluxvale/apps/tfprovider/internal/provider"
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 )
 
-// version rides the client's User-Agent; wire the real value at
-// release build time via -ldflags "-X main.version=vX.Y.Z".
-var version = "dev"
-
 func main() {
-	var debug bool
+	var debug, showVersion bool
 
 	flag.BoolVar(&debug, "debug", false, "run with support for terraform's dev_overrides")
+	// The release build's version proof: the release workflow runs
+	// `-version` per leg and asserts it carries the tag's version. One
+	// source — provider.Version — feeds this and the User-Agent.
+	flag.BoolVar(&showVersion, "version", false, "print the provider version and exit")
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println("terraform-provider-fluxvale " + provider.Version)
+		return
+	}
 
 	opts := providerserver.ServeOpts{
 		Address: "registry.terraform.io/fluxvale/fluxvale",
 		Debug:   debug,
 	}
 
-	err := providerserver.Serve(context.Background(), provider.New(version), opts)
+	err := providerserver.Serve(context.Background(), provider.New(provider.Version), opts)
 
 	if err != nil {
 		log.Fatal(err.Error())
