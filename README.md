@@ -5,10 +5,9 @@ A thin skin over the FluxVale JSON:API (`/api/v1`, PAT auth) —
 Policy, paywall, and scopes enforce server-side; the provider
 re-implements nothing.
 
-**Status**: P4–P5 of #482 — the instance resource, the catalog data
-sources, and the instance family's backups + access-gateway resources,
-on the scaffold (#482 P3). `fluxvale_custom_domain` lands in a
-follow-up slice.
+**Status**: P4–P6 of #482 — the instance resource, the catalog data
+sources, and the instance family's backups + access-gateway +
+custom-domain resources, on the scaffold (#482 P3).
 
 ## Resources and data sources
 
@@ -85,6 +84,54 @@ follow-up slice.
     manage attachments with it null) and `instances` stays null after
     import; a config value that doesn't match what's stored plans a
     replacement, and replacements are rejected at plan time.
+- `fluxvale_custom_domain` — your own domain on the private-access
+  edge (`apps.example.com`). Register lands the row `pending` and
+  mints the wildcard Certificate in the same transaction; verification
+  is issuance — the platform's observer pass (about a 15-minute
+  cadence) promotes `pending → verified` once your DNS delegation
+  answers the DNS-01 challenge, and fails the row past its issuance
+  window (~72h). Default create returns at `pending`; refreshes show
+  the progression via `state`. Set `wait_for_verification = true` to
+  poll instead — bounded by `timeouts.create` (default 45m). A timeout
+  leaves the row tainted but tracked (it keeps verifying server-side):
+  `tofu untaint` — or `terraform untaint` — keeps the registration,
+  and the following refresh shows the promoted state; without
+  untainting, the next apply destroys and re-registers. `failed` fails
+  the create fast (it's terminal: remove and re-register).
+  - **`verified` is NOT resolution.** Promotion mints the domain's
+    serving arms, but the split-DNS claim — the tailnet-side route
+    that makes the name ANSWER — has no API surface yet; claiming is a
+    separate platform capability on a later slice. This resource
+    registers, verifies (DNS-01), and tears down, nothing more.
+  - `resume` is deliberately not exposed. A `suspended` domain is
+    legacy state: domains are free (ADR-0040 Am. 2), nothing current
+    suspends one — the state and its resume survive for old rows only.
+    The raw `PATCH /api/v1/access-domains/:id/resume` is the only
+    resume surface (no domains panel, no MCP tool). Watch `state`.
+  - Names are unique platform-wide, across ALL organizations: the
+    duplicate 400 surfaces verbatim (the name may belong to another
+    org). The platform canonicalizes (trim + downcase); the provider
+    sends the canonical name on the wire and decides replacement on
+    canonical forms, so any config casing converges — the plan and
+    state keep the form you wrote. Only a genuinely different
+    canonical name replaces (hand-edited state included — the
+    canonical row is the truth).
+  - `organization` accepts id or slug; the plan normalizes a set value
+    to the resolved id, so a slug config converges with an imported
+    id. Only a genuinely different organization replaces.
+  - Destroy is the platform's full teardown behind one synchronous
+    DELETE (hostname pre-check → tailnet unclaim → row destroy →
+    CoreDNS re-render → Certificate safe-delete); a 404 is
+    already-gone. A domain still serving instance hostnames is
+    refused (the platform's 400): remove those first.
+  - Import: `terraform import fluxvale_custom_domain.x <id>`. The read
+    goes by id (no org resolution — a multi-org token imports fine,
+    and a revoked membership still refreshes) and fills the wire
+    mirror: `domain` (the canonical name), `kind` (`custom` for
+    provider-created rows; an imported id may be a system-minted
+    `platform` row), `state`, `organization_id` — and seeds
+    `organization` with the wire's id, so a config that leaves it
+    unset (or names it by slug) converges.
 - `fluxvale_apps` — the catalog. `fluxvale_app_versions` — one app's
   versions, by `app` (slug) or `app_id`.
 

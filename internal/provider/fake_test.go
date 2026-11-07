@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/fluxvale/fluxvale/apps/tfprovider/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
@@ -53,6 +55,13 @@ type fakeAPI struct {
 	gatewayPostDoc     string
 	detachStatus       int
 
+	// access-domain slice
+	domainPostStatus   int // POST /access-domains (the register)
+	domainPostDoc      string
+	domainGets         []scriptedResponse // GET /access-domains/:id
+	domainDeleteStatus int
+	domainDeleteDoc    string
+
 	t *testing.T
 }
 
@@ -78,6 +87,10 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		gatewayPostDoc:     gatewayCreateDoc,
 		backupPostDoc:      backupRowDoc,
 		backupPatchDoc:     backupRowDoc,
+		domainPostStatus:   http.StatusCreated,
+		domainPostDoc:      domainPendingDoc,
+		domainDeleteStatus: http.StatusOK,
+		domainDeleteDoc:    domainDeleteDoc,
 	}
 	mux := http.NewServeMux()
 
@@ -197,6 +210,24 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 	mux.HandleFunc("DELETE /api/v1/access-gateways/{id}/attachments/{iid}", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r, nil)
 		f.json(w, f.detachStatus, `{"success": true}`)
+	})
+
+	// Access domains: the register (201), the id-scoped read, and the
+	// synchronous teardown DELETE. The DELETE 200 renders the row flat
+	// (the generic-action shape — no JSON:API envelope).
+	mux.HandleFunc("POST /api/v1/access-domains", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.record(r, body)
+		f.json(w, f.domainPostStatus, f.domainPostDoc)
+	})
+	mux.HandleFunc("GET /api/v1/access-domains/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.record(r, nil)
+		f.scriptedGet(w, r, &f.domainGets)
+	})
+	mux.HandleFunc("DELETE /api/v1/access-domains/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.record(r, nil)
+		f.json(w, f.domainDeleteStatus, f.domainDeleteDoc)
 	})
 
 	f.Server = httptest.NewServer(mux)
@@ -345,6 +376,21 @@ const (
 		"organization_id": "org-1", "hostname": "fv-0a1b2c3d", "tailnet_domain": "example.ts.net",
 		"provider": "tailscale", "state": "active", "status_message": null,
 		"monthly_cents": 500, "provisioned_at": "2026-11-06T10:00:00Z"}}}`
+
+	// The access-domain rows: the pinned public field set — id rides
+	// the document, the attributes are exactly domain/kind/state/
+	// organization_id (cert_secret_ref is internal, never on the wire).
+	domainPendingDoc = `{"data": {"id": "dom-1", "type": "access_domain", "attributes": {
+		"domain": "apps.customer.com", "kind": "custom", "state": "pending",
+		"organization_id": "org-1"}}}`
+
+	domainVerifiedDoc = `{"data": {"id": "dom-1", "type": "access_domain", "attributes": {
+		"domain": "apps.customer.com", "kind": "custom", "state": "verified",
+		"organization_id": "org-1"}}}`
+
+	// The teardown DELETE's 200 renders the row flat (the generic
+	// action's shape — the id at the top level, no JSON:API envelope).
+	domainDeleteDoc = `{"id": "dom-1", "domain": "apps.customer.com", "kind": "custom", "state": "pending"}`
 )
 
 // statusDoc renders the running fixture with a different status — the
@@ -441,6 +487,39 @@ func testGateway(mutators ...func(*gatewayModel)) gatewayModel {
 		m(&data)
 	}
 	return data
+}
+
+// testDomain builds a customDomainModel with the required fields set;
+// mutators adjust the rest. The timeouts object is null with the
+// schema's exact CustomType shape (create only) — the framework
+// null-diffs against it.
+func testDomain(mutators ...func(*customDomainModel)) customDomainModel {
+	data := customDomainModel{
+		Domain:              types.StringValue("apps.customer.com"),
+		Organization:        types.StringNull(),
+		WaitForVerification: types.BoolNull(),
+		Timeouts: timeouts.Value{Object: types.ObjectNull(map[string]attr.Type{
+			"create": types.StringType,
+		})},
+		ID:             types.StringNull(),
+		Kind:           types.StringNull(),
+		State:          types.StringNull(),
+		OrganizationID: types.StringNull(),
+	}
+	for _, m := range mutators {
+		m(&data)
+	}
+	return data
+}
+
+// timeoutsWith builds the model's timeouts object carrying a create
+// duration — the wait-deadline override in tests (the validator only
+// checks parseability, the framework stores the string).
+func timeoutsWith(create string) timeouts.Value {
+	return timeouts.Value{Object: types.ObjectValueMust(
+		map[string]attr.Type{"create": types.StringType},
+		map[string]attr.Value{"create": types.StringValue(create)},
+	)}
 }
 
 // setInput wraps plain strings into the schema's instances types.Set.

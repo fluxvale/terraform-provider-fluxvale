@@ -163,6 +163,7 @@ func TestProviderRegistrations(t *testing.T) {
 		"fluxvale_instance":         false,
 		"fluxvale_instance_backups": false,
 		"fluxvale_access_gateway":   false,
+		"fluxvale_custom_domain":    false,
 	}
 	resources := p.Resources(ctx)
 	if len(resources) != len(wantResources) {

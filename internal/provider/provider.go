@@ -47,7 +47,9 @@ func New(version string) func() provider.Provider {
 
 // providerData is what Configure hands to every resource and data
 // source: the authenticated client, the pinged identity, and the
-// poll pacing for async lifecycles (deploy wait, teardown wait).
+// poll pacing for async lifecycles (deploy wait, teardown wait, the
+// custom-domain verify wait — that wait's deadline comes from the
+// resource's timeouts.create; only the interval comes from here).
 type providerData struct {
 	client       *client.Client
 	userID       string
@@ -161,6 +163,7 @@ func (p *fluxvaleProvider) Resources(ctx context.Context) []func() resource.Reso
 		NewInstanceResource,
 		NewBackupsResource,
 		NewGatewayResource,
+		NewCustomDomainResource,
 	}
 }
 
