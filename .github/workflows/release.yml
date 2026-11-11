@@ -306,17 +306,20 @@ jobs:
       # committed public key — verified in a FRESH GNUPGHOME holding
       # only the committed key, so the release can never ship a
       # signature the committed key can't verify. The secret never
-      # echoes: env-indirected, piped to gpg.
+      # echoes: env-indirected, piped to gpg. Every gpg call is
+      # --batch --pinentry-mode loopback: no passphrase to prompt (the
+      # key has none) and no interactive fallback can ever fire —
+      # non-interactive or the step reds, never a dialog.
       - name: Sign the checksums
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
-          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --pinentry-mode loopback --import
           cd dist
-          gpg --batch --yes --detach-sig --armor SHA256SUMS
+          gpg --batch --pinentry-mode loopback --yes --detach-sig --armor SHA256SUMS
           proof_home="$(mktemp -d)"
-          GNUPGHOME="$proof_home" gpg --import ../terraform-provider-signing.asc
-          GNUPGHOME="$proof_home" gpg --verify SHA256SUMS.sig SHA256SUMS
+          GNUPGHOME="$proof_home" gpg --batch --pinentry-mode loopback --import ../terraform-provider-signing.asc
+          GNUPGHOME="$proof_home" gpg --batch --pinentry-mode loopback --verify SHA256SUMS.sig SHA256SUMS
           rm -rf "$proof_home"
 
       # Install primer: manual-first until the registries list us (the
