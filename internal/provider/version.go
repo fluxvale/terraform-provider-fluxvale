@@ -8,4 +8,4 @@ package provider
 // its doc sweep: docs/guides/install.md and the platform's public doc
 // (docs/public/automation/terraform.md in the fluxvale/fluxvale
 // monorepo) name the concrete archives.
-const Version = "0.2.0"
+const Version = "0.2.1"

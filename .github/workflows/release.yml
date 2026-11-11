@@ -229,6 +229,16 @@ jobs:
       # Per-leg checksum part (the zip only); publish merges the parts,
       # appends the manifest's line, and signs the versioned whole.
       # shasum is macOS's fallback (same `<hash>  <file>` format).
+      #
+      # TEXT MODE IS THE CONTRACT: the registries parse SHA256SUMS
+      # expecting `<hash><space><space><name>` — OpenTofu's parser
+      # (strings.Fields over the line) turns a GNU binary-mode marker
+      # (`*` before the name, sha256sum's default in Git Bash on the
+      # Windows runner) into a key of `*name`, and the bare-filename
+      # lookup silently drops that platform from the published
+      # version. So every line is normalized to two spaces and the
+      # marker is a HARD RED — v0.2.0 shipped exactly this defect on
+      # its windows_amd64 line (fixed in v0.2.1).
       - name: Checksum the archive
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -237,9 +247,16 @@ jobs:
           archive="terraform-provider-fluxvale_${VERSION}_${OS_ARCH}.zip"
           test -f "$archive" || { echo "::error::no archive for this leg"; exit 1; }
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$archive" > "SHA256SUMS.${OS_ARCH}"
+            sha256sum --text "$archive" > "SHA256SUMS.${OS_ARCH}"
           else
             shasum -a 256 "$archive" > "SHA256SUMS.${OS_ARCH}"
+          fi
+          # Normalize regardless of source: strip any binary-mode
+          # marker to the two-space text form.
+          sed -i 's/ \*/  /' "SHA256SUMS.${OS_ARCH}"
+          if grep -Eq '^[0-9a-f]{64} \*' "SHA256SUMS.${OS_ARCH}"; then
+            echo "::error::binary-mode marker survived normalization in SHA256SUMS.${OS_ARCH} — the registries would drop this platform"
+            exit 1
           fi
           cat "SHA256SUMS.${OS_ARCH}"
 
@@ -309,6 +326,13 @@ jobs:
           # how many legs wrote parts.
           sha256sum "terraform-provider-fluxvale_${version}_manifest.json" >> "terraform-provider-fluxvale_${version}_SHA256SUMS"
           cat "terraform-provider-fluxvale_${version}_SHA256SUMS"
+          # The marker gate again, on the merged file — the last line
+          # of defense before anything signs or ships (the per-leg
+          # gate already normalized; this catches any future writer).
+          if grep -Eq '^[0-9a-f]{64} \*' "terraform-provider-fluxvale_${version}_SHA256SUMS"; then
+            echo "::error::binary-mode marker in the merged sums — the registries would drop that platform"
+            exit 1
+          fi
           sha256sum -c "terraform-provider-fluxvale_${version}_SHA256SUMS"
 
       # The registry layout wants one zip per os_arch — name the four,

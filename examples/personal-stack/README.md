@@ -1,7 +1,7 @@
 # The owner's personal stack (example)
 
 The shape of the stack this provider exists to manage — #482's
-acceptance story, placeholders only. The PA fills
+acceptance story, placeholders only. The owner fills
 `terraform.tfvars.example → terraform.tfvars` and runs the acceptance
 plan/apply/destroy against the owner's real organization.
 
