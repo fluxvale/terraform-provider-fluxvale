@@ -31,7 +31,7 @@ resource "fluxvale_instance" "memos" {
 ## Argument Reference
 
 - `name` (Required) — the instance's display name. Create-only: changing it replaces the instance.
-- `app` / `app_version` (Optional) — the catalog app slug and the version string; the slug form of `app_version_id`. Create-only. Either pin the exact version or resolve it through the [`fluxvale_app_versions`](../data-sources/app_versions.md) data source — the catalog's row order is a version-string sort, not a release order, so no "first row" shortcut exists.
+- `app` / `app_version` (Optional) — the catalog app slug and the version string; the slug form of `app_version_id`. Create-only. Either pin the exact version or resolve it through the [`fluxvale_app_versions`](../data-sources/app_versions.md) data source — the catalog order is semver-newest-first, but pin deliberately: a pin survives re-ordering and new releases.
 - `app_version_id` (Optional) — the id form; computed when the slug pair is set.
 - `cpu_cores` (Required, Float64) / `memory_mb` (Required) / `storage_gb` (Required) — the allocation. Resizes in place (storage up-only).
 - `env_vars` (Optional, map, write-only) — the API never echoes it, so plan can't see server-side drift by design, and the configured value is kept verbatim in state.

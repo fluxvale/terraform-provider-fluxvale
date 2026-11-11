@@ -20,10 +20,10 @@ lives next door in
   three representative shapes pinned to catalog versions: a public
   always-on forgejo, memos and kavita private behind the gateway.
   Versions are explicit pins (bumping replaces the instance — the
-  volume caveat under "Run and verify"; the catalog's row order
-  is a version-string sort, not a release order, so no "first row"
-  shortcut exists — the instance resource preconditions the pin
-  against the catalog at plan).
+  volume caveat under "Run and verify"; the catalog's row order is
+  semver-newest-first (#700), but a pin preconditions against the
+  catalog at plan and survives re-ordering — no "first row" shortcut
+  in code, on purpose).
 - **1 backups row per instance** — endpoint composed from the
   Cloudflare account id, bucket from the TF-created bucket, per
   instance prefix and retention.
@@ -70,9 +70,11 @@ tofu console
 > [for v in data.fluxvale_app_versions.all["memos"].app_versions : v.version]
 ```
 
-NB the versions list is a version-STRING sort (the API's own order:
-`3.4.1-bundled` sits above `3.4.1`) — read it as a set of choices,
-not a newest-first ranking.
+NB the versions list is semver-newest-first (the API's own order
+since #700 — `3.4.1` sits above `3.4.1-bundled`, a pre-release
+sorts below its release). Reading `app_versions[0]` as "newest" is
+now correct; the instances above still pin explicitly because a pin
+survives re-ordering and new releases.
 
 ## Install the providers (once)
 

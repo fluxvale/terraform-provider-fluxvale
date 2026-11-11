@@ -34,6 +34,15 @@ carrying only the binary, plus the registry's versioned assets —
 signature `_SHA256SUMS.sig`, verifiable against the committed
 [`terraform-provider-signing.asc`](terraform-provider-signing.asc).
 
+## Development identity
+
+Set the company commit identity locally before committing — the
+global fallback may differ:
+
+```sh
+git config user.email terence@fluxvale.com
+```
+
 ## Dev loop
 
 `mise install` (Go + OpenTofu, pinned), then the gates CI runs:

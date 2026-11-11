@@ -20,7 +20,7 @@ provider "fluxvale" {
 resource "fluxvale_instance" "kavita" {
   name        = "Kavita"
   app         = "kavita"
-  app_version = "3.4.1" # pin explicitly — the catalog's row order is not a release order
+  app_version = "3.4.1" # pin explicitly — a pin survives re-ordering and new releases
   cpu_cores   = 1
   memory_mb   = 512
   storage_gb  = 10

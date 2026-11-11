@@ -15,8 +15,11 @@ lockfile = true
 
 [tools]
 # Same pin discipline as the monorepo lanes: the compiler pair must
-# not drift (extracted at go 1.26.10, the monorepo's pin at the time).
-go = "1.26.10"
+# not drift. 1.26.11 = the stdlib security fix for the net/http
+# vulnerability govulncheck flagged on the first run of this repo's
+# gate (fixed in go1.26.11; the extraction started at the monorepo's
+# 1.26.10 pin).
+go = "1.26.11"
 
 # The `tofu` binary — the real-tofu smoke gate in ci.yml (a real CLI
 # driving the real binary; in-process framework tests can't catch a

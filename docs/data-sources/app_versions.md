@@ -34,4 +34,4 @@ The list `app_versions` is ordered newest first; each element carries `id` (the 
 
 ## Notes
 
-Version pins on `fluxvale_instance` are deliberate: the catalog's row order is a version-string sort, not a release order, so no "first row" shortcut exists — resolve the version you mean (like the `[0]` above, newest first) or pin the exact string.
+Version pins on `fluxvale_instance` are deliberate even though the list is semver-newest-first (a pre-release sorts below its release): a pin survives re-ordering and new releases. `app_versions[0]` is the newest release when that is what you mean.
