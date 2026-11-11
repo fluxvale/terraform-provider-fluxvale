@@ -1,9 +1,9 @@
 # The owner's personal stack (#482's acceptance): a public app, a
 # private app behind the access gateway, one R2 bucket feeding both
 # instances' backups, and the org's custom domain. PLACEHOLDERS ONLY —
-# the PA collects the real values (terraform.tfvars.example →
-# terraform.tfvars) and runs the acceptance plan/apply/destroy against
-# the real org; nothing real belongs in git.
+# fill in the real values yourself (terraform.tfvars.example →
+# terraform.tfvars) and run the plan/apply/destroy against your real
+# org; nothing real belongs in git.
 
 terraform {
   required_providers {

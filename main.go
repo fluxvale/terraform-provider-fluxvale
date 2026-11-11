@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/fluxvale/fluxvale/apps/tfprovider/internal/provider"
+	"github.com/fluxvale/terraform-provider-fluxvale/internal/provider"
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 )
 

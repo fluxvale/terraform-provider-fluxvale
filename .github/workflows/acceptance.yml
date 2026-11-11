@@ -1,0 +1,141 @@
+# The provider's acceptance lane — moved from the monorepo's
+# tfprovider-acceptance.yml (fluxvale/fluxvale), paths re-rooted, tag
+# trigger switched to this repo's plain v* scheme. The framework
+# acceptance tests (internal/provider/acceptance_test.go) run against
+# a REAL FluxVale org — real instances, real backups row, real
+# gateway, real domain.
+#
+# NEVER per-PR: every run creates real, billing platform rows — the
+# wallet shape follows e2e-nightly (schedule + workflow_dispatch) plus
+# v* tags (release acceptance). PRs get the real-tofu smoke against a
+# fake API instead (ci.yml).
+#
+# SECRETS — tiered (not a blocker for this workflow's landing):
+#
+# Floor: TF_ACC_PAT alone runs the suite, and the catalog + instance
+# classes are the nightly proof. Mint per the platform's deployment
+# docs (scopes instances:write backups:write gateways:write +
+# catalog:read); the preflight below fails loud smoke-style until it
+# exists, so a nightly REDS rather than green-skips through proving
+# nothing.
+#
+# The rest of the story unlocks as the remaining secrets land — until
+# then those classes SKIP with a notice (the floor still runs):
+#   - TF_ACC_BACKUP_* (the R2 coordinates) — the backups composition;
+#     the org must have paid ONCE for backups (the server's paywall).
+#   - TF_ACC_TAILNET_DOMAIN/TF_ACC_TAILSCALE_AUTH_KEY — the gateway.
+#     NOTE: the gateway has no API delete route, so its first
+#     acceptance run is a standing monthly charge; later runs adopt
+#     the existing gateway.
+#   - TF_ACC_DOMAIN — the custom domain class.
+#
+# The CLI driver: plugin-testing drives a terraform-shaped CLI —
+# TF_ACC_TERRAFORM_PATH points at the mise-pinned tofu,
+# TF_ACC_TERRAFORM_VERSION declares its version, and
+# TF_ACC_PROVIDER_NAMESPACE/HOST pin the registry address tofu
+# resolves against.
+name: acceptance
+
+on:
+  schedule:
+    - cron: "41 3 * * *" # nightly, off the top-of-hour rush
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: acceptance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    name: Acceptance (staging)
+    # schedule fires on main only by construction; dispatch may target
+    # a branch (for validating changes to this file or the tests); tags
+    # carry their own ref. Pull requests never enter — no such trigger.
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    # Two instances' deploy waits (10m poll deadlines), the gateway
+    # provisioning wait, and the rest — the suite's worst case fits
+    # under the go test timeout below; this is the job ceiling.
+    timeout-minutes: 60
+    env:
+      # mise x must USE the installed tofu without auto-installing the
+      # config's other pins
+      MISE_AUTO_INSTALL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Same single-source-of-truth shape as the ci.yml lane: parse the
+      # Go version from mise.toml.
+      - name: Read Go version from mise.toml
+        id: go
+        run: |
+          version="$(sed -n 's/^go *= *"\([^"]*\)".*/\1/p' mise.toml)"
+          echo "go=$version"
+          test -n "$version"
+          echo "go=$version" >>"$GITHUB_OUTPUT"
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.go.outputs.go }}
+          cache-dependency-path: go.sum
+
+      # The mise pin, verified against mise.lock — same shape as the
+      # ci.yml lane (binaries only, the one tool this job needs). The
+      # cached pre-stage rides ahead of mise-action; the cache-suffix
+      # provider is SHARED with the ci.yml job deliberately — identical
+      # toolset (mise + opentofu), one warm entry between them. Keep
+      # the two version pins bumped together.
+      - uses: ./.github/actions/mise
+        with:
+          version: "2026.9.14"
+          cache-suffix: provider
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: 2026.9.14
+          install: false
+      - run: mise install opentofu
+
+      # A missing secret fails HERE with its own message — not as a
+      # cryptic acceptance failure blaming the provider.
+      - name: Preflight — secrets
+        env:
+          TF_ACC_PAT: ${{ secrets.TF_ACC_PAT }}
+        run: |
+          test -n "$TF_ACC_PAT" || { echo "::error::TF_ACC_PAT is not set — mint per the platform's deployment docs (scopes instances:write backups:write gateways:write + catalog:read; the org must have paid once for backups)"; exit 1; }
+
+      - name: Run the acceptance tests
+        env:
+          TF_ACC: "1"
+          TF_ACC_API_URL: https://staging.fluxvale.com
+          TF_ACC_PAT: ${{ secrets.TF_ACC_PAT }}
+          # Optional classes — unset secrets resolve to empty strings
+          # and accSkip skips their tests (the tiered header contract).
+          TF_ACC_APP_SLUG: ${{ secrets.TF_ACC_APP_SLUG }}
+          TF_ACC_BACKUP_ENDPOINT: ${{ secrets.TF_ACC_BACKUP_ENDPOINT }}
+          TF_ACC_BACKUP_BUCKET: ${{ secrets.TF_ACC_BACKUP_BUCKET }}
+          TF_ACC_BACKUP_ACCESS_KEY_ID: ${{ secrets.TF_ACC_BACKUP_ACCESS_KEY_ID }}
+          TF_ACC_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.TF_ACC_BACKUP_SECRET_ACCESS_KEY }}
+          TF_ACC_TAILNET_DOMAIN: ${{ secrets.TF_ACC_TAILNET_DOMAIN }}
+          TF_ACC_TAILSCALE_AUTH_KEY: ${{ secrets.TF_ACC_TAILSCALE_AUTH_KEY }}
+          TF_ACC_DOMAIN: ${{ secrets.TF_ACC_DOMAIN }}
+          # plugin-testing registers the in-process provider under its
+          # default registry.terraform.io address; tofu resolves the
+          # implicit provider against registry.opentofu.org — the two
+          # must agree or the first init fails.
+          TF_ACC_PROVIDER_NAMESPACE: hashicorp
+          TF_ACC_PROVIDER_HOST: registry.opentofu.org
+        run: |
+          TF_ACC_TERRAFORM_PATH="$(mise which tofu)"
+          TF_ACC_TERRAFORM_VERSION="$(mise x -- tofu version | head -1 | sed 's/^OpenTofu v//')"
+          export TF_ACC_TERRAFORM_PATH TF_ACC_TERRAFORM_VERSION
+          echo "driving tofu $(mise x -- tofu version | head -1) via $TF_ACC_TERRAFORM_PATH"
+          mise x -- go test ./internal/provider -run 'TestAcc' -count=1 -timeout 50m -v

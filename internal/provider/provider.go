@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fluxvale/fluxvale/apps/tfprovider/internal/client"
+	"github.com/fluxvale/terraform-provider-fluxvale/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -21,7 +21,7 @@ import (
 
 const (
 	// envToken is the documented credential fallback — stable in the
-	// compatibility contract (apps/tfprovider/docs/compatibility.md).
+	// compatibility contract (docs/guides/compatibility.md).
 	envToken = "FLUXVALE_PAT"
 
 	// defaultAPIURL matches the contract's documented default; staging
@@ -33,8 +33,10 @@ var _ provider.Provider = (*fluxvaleProvider)(nil)
 
 // fluxvaleProvider implements provider.Provider.
 type fluxvaleProvider struct {
-	// version is the binary's version (wired at release build time via
-	// -ldflags); it rides the client's User-Agent.
+	// version is the binary's version — the const in version.go, set
+	// at build (no ldflags: the release workflow asserts the binary
+	// itself reports the tag's version); it rides the client's
+	// User-Agent.
 	version string
 }
 

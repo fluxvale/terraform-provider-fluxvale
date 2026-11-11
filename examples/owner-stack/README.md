@@ -20,10 +20,10 @@ lives next door in
   three representative shapes pinned to catalog versions: a public
   always-on forgejo, memos and kavita private behind the gateway.
   Versions are explicit pins (bumping replaces the instance — the
-  volume caveat under "Run and verify"; the catalog's row order
-  is a version-string sort, not a release order, so no "first row"
-  shortcut exists — the instance resource preconditions the pin
-  against the catalog at plan).
+  volume caveat under "Run and verify"; the catalog's row order is
+  semver-newest-first (#700), but a pin preconditions against the
+  catalog at plan and survives re-ordering — no "first row" shortcut
+  in code, on purpose).
 - **1 backups row per instance** — endpoint composed from the
   Cloudflare account id, bucket from the TF-created bucket, per
   instance prefix and retention.
@@ -43,7 +43,7 @@ it, no manual steps: backups rows follow their instance and the
 bucket; the attach calls follow the gateway and each private
 instance.
 
-## The pairing checklist — what Terence brings
+## The pairing checklist — what you bring
 
 | Value | Where it comes from | Goes where |
 | --- | --- | --- |
@@ -58,7 +58,7 @@ instance.
 | `instances[].domain` | the dogfood plan — `git.fluxvale.com` (forgejo) and `analytics.fluxvale.com` (umami) are the placeholder pairings | optional, `terraform.tfvars` — left unset until that plan lands |
 
 The token scopes match the workflow's acceptance preflight
-(`.github/workflows/tfprovider-acceptance.yml`); mint once, reuse.
+(`.github/workflows/acceptance.yml`); mint once, reuse.
 
 To see the catalog while picking apps and version pins (after
 `tofu init` and with `FLUXVALE_PAT` exported — the console reads the
@@ -70,27 +70,29 @@ tofu console
 > [for v in data.fluxvale_app_versions.all["memos"].app_versions : v.version]
 ```
 
-NB the versions list is a version-STRING sort (the API's own order:
-`3.4.1-bundled` sits above `3.4.1`) — read it as a set of choices,
-not a newest-first ranking.
+NB the versions list is semver-newest-first (the API's own order
+since #700 — `3.4.1` sits above `3.4.1-bundled`, a pre-release
+sorts below its release). Reading `app_versions[0]` as "newest" is
+now correct; the instances above still pin explicitly because a pin
+survives re-ordering and new releases.
 
 ## Install the providers (once)
 
 This module composes two providers, so it needs the
-[filesystem mirror](../../docs/install.md) setup. With
+[filesystem mirror](../../docs/guides/install.md) setup. With
 `dev_overrides` alone, `tofu init` queries the registry for the
 unpublished fluxvale provider and fails on that lookup (cloudflare
 itself installs fine) — the mirror is what makes init fully green:
-download the release zip + `SHA256SUMS`, verify, drop the zip into
-`~/.tfplugins-mirror`, point `~/.tofurc` at it — docs/install.md
-§1–3 walks it (release assets ship from `tf-v0.1.1` on; the
-`tf-v0.1.0` release page is up but empty — its build run failed
-before attaching any).
+download the release zip + the versioned `*_SHA256SUMS` (+
+`*_SHA256SUMS.sig`), verify, drop the zip into
+`~/.tfplugins-mirror`, point `~/.tofurc` at it — docs/guides/install.md
+§1–3 walks it (this repo's releases ship from `v0.2.0` on; the
+monorepo's historical `tf-v0.1.x` releases stay where they were).
 
 ## Run and verify
 
 ```sh
-cd apps/tfprovider/examples/owner-stack
+cd examples/owner-stack
 cp terraform.tfvars.example terraform.tfvars   # then fill it in
 export FLUXVALE_PAT=fvpat_…                    # never in a file
 tofu init                                      # mirror + registry (cloudflare)

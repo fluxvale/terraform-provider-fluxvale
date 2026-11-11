@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fluxvale/fluxvale/apps/tfprovider/internal/client"
+	"github.com/fluxvale/terraform-provider-fluxvale/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	frameworkresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
@@ -21,8 +21,8 @@ import (
 
 // Acceptance tests: REAL resources against a REAL FluxVale org
 // (#482's acceptance lane). NEVER per-PR — every step creates real,
-// billing platform rows, so this runs nightly, on tf-v* tags, and on
-// demand (.github/workflows/tfprovider-acceptance.yml); the secret it
+// billing platform rows, so this runs nightly, on v* tags, and on
+// demand (.github/workflows/acceptance.yml); the secret it
 // needs minting is listed in that workflow's comments.
 //
 // Environment:
@@ -90,7 +90,7 @@ func accVars(t *testing.T) config.Variables {
 func accPreCheck(t *testing.T) {
 	t.Helper()
 	if os.Getenv("TF_ACC_API_URL") == "" || os.Getenv("TF_ACC_PAT") == "" {
-		t.Fatalf("TF_ACC_API_URL and TF_ACC_PAT must be set — mint a PAT per docs/deployment.md " +
+		t.Fatalf("TF_ACC_API_URL and TF_ACC_PAT must be set — mint a PAT on the platform " +
 			"(scopes instances:write backups:write gateways:write + catalog:read; the org must have paid once for backups)")
 	}
 }
@@ -109,7 +109,7 @@ func accSkip(t *testing.T, test string, envs ...string) {
 	t.Helper()
 	for _, e := range envs {
 		if os.Getenv(e) == "" {
-			t.Skipf("%s skipped — %s is not set (the PA mints it per docs/deployment.md)", test, e)
+			t.Skipf("%s skipped — %s is not set (mint it per the scopes in .github/workflows/acceptance.yml preflight)", test, e)
 		}
 	}
 }

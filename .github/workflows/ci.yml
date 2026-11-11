@@ -1,0 +1,108 @@
+# The provider's per-PR lane — carried over from the monorepo's
+# tfprovider job (ci.yml there) with paths re-rooted at the repo top
+# (the provider IS the repo now). Same gates, same shape: gofmt + vet
+# + test + build, the release-tag gate's fixtures, shellcheck, and
+# the real-tofu smoke — a real OpenTofu CLI driving the real compiled
+# binary (plan, apply, destroy) against a fake API, the gate that
+# catches what in-process tests cannot.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: Provider CI
+    runs-on: ubuntu-24.04
+    # The gates + the real-tofu smoke (~1 min with the toolchain
+    # download; the 10s of the gateway-observe poll inside).
+    # 25 is a ceiling, not a target.
+    timeout-minutes: 25
+    env:
+      # mise x must USE the installed tofu without auto-installing the
+      # config's other pins
+      MISE_AUTO_INSTALL: "0"
+    steps:
+      # persist-credentials: false — later steps run no git-authenticated ops
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # mise.toml is the single source of truth for tool versions; parse
+      # (not install) so CI and local dev can't drift.
+      - name: Read Go version from mise.toml
+        id: go
+        run: |
+          version="$(sed -n 's/^go *= *"\([^"]*\)".*/\1/p' mise.toml)"
+          echo "go=$version"
+          test -n "$version"
+          echo "go=$version" >>"$GITHUB_OUTPUT"
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.go.outputs.go }}
+          cache-dependency-path: go.sum
+
+      # Fails on any output: the files gofmt would rewrite.
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          [ -z "$out" ] || { echo "$out"; exit 1; }
+
+      - run: go vet ./...
+
+      - run: go test ./...
+
+      - run: go build ./...
+
+      # Go vulnerability scanning — re-homed from the platform
+      # monorepo's nightly pentest dep-audit when the provider left
+      # that repo (its govulncheck half was exactly this gate).
+      # govulncheck exits non-zero on CALLED vulnerabilities (exit 3)
+      # and on broken runs (1/2); import-only findings stay green —
+      # the same severity posture the monorepo script ran.
+      - name: govulncheck
+        run: |
+          gov_bin="$(mktemp -d)"
+          GOBIN="$gov_bin" go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          "$gov_bin/govulncheck" ./...
+
+      # The release-tag gate's fixtures, proven here on every PR — the
+      # same shape the monorepo's provider lane ran.
+      - run: ./scripts/test-check-tag-version.sh
+
+      - run: shellcheck scripts/*.sh
+
+      # The real-tofu smoke (TFPROVIDER_E2E=1 below): same pins + install
+      # shape as the monorepo lane — binaries verified against mise.lock;
+      # install the ONE tool this job needs, never the whole config. The
+      # cached pre-stage rides ahead of mise-action for the same reason.
+      - uses: ./.github/actions/mise
+        with:
+          version: "2026.9.14"
+          cache-suffix: provider
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: 2026.9.14
+          install: false
+      - run: mise install opentofu
+
+      # Examples are user-facing copy-paste: formatting is part of the
+      # contract. Offline — no provider install, just the formatter.
+      - name: tofu fmt (examples)
+        run: mise x -- tofu fmt -check -recursive examples
+
+      # Offline (the fake is an httptest server; dev_overrides needs no
+      # registry): plan → apply → destroy against the freshly built
+      # binary. See internal/provider/e2e_test.go for what this gate is
+      # for.
+      - name: Real-tofu smoke (plan, apply, destroy)
+        env:
+          TFPROVIDER_E2E: "1"
+        run: mise x -- go test ./internal/provider -run TestRealTofuSmoke -count=1 -v

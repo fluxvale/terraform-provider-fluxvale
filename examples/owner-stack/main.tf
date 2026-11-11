@@ -12,7 +12,7 @@ terraform {
   required_providers {
     fluxvale = {
       source  = "registry.terraform.io/fluxvale/fluxvale"
-      version = "~> 0.1" # not on any registry — installed per docs/install.md
+      version = ">= 0.1" # not on any registry yet — installed per docs/guides/install.md (tf-v0.1.x on the monorepo, v0.2.0+ here)
     }
     cloudflare = {
       source  = "cloudflare/cloudflare"
@@ -60,9 +60,9 @@ data "fluxvale_app_versions" "all" {
 
 locals {
   # The deploy pin, per instance. Deliberately explicit — the
-  # catalog's version rows come back in a version-STRING sort, not a
-  # release order (3.4.1-bundled sorts above 3.4.1; 9.x would sort
-  # above 10.x), so "first row" means nothing. Bumping the pin is the
+  # catalog's rows are semver-newest-first now (#700), but a pin
+  # preconditions against the catalog at plan and survives
+  # re-ordering — no "first row" shortcut in code. Bumping the pin is the
   # upgrade path, and a pin change replaces the instance (create-only
   # identity) — bump deliberately.
   versions = { for k, v in var.instances : k => v.version }

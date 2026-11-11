@@ -1,0 +1,34 @@
+# Toolchain for the FluxVale Terraform/OpenTofu provider.
+# The platform monorepo (fluxvale/fluxvale) carries the BEAM/Node pins;
+# this repo pins its own small set: the Go that builds the provider,
+# the OpenTofu CLI that gates it (fmt, the real-tofu smoke, the
+# acceptance lane's driver), and shellcheck for the scripts.
+
+[settings]
+# mise.lock pins download URLs + checksums per platform, so installs
+# are verified and identical on every machine/CI runner.
+# NB: deliberately NOT setting `locked = true` here — it applies to all
+# configs in scope, so teammates' global tools (not in this lockfile)
+# would fail to install. CI should use the flag form instead:
+#   MISE_LOCKED=1 mise install
+lockfile = true
+
+[tools]
+# Same pin discipline as the monorepo lanes: the compiler pair must
+# not drift. 1.26.11 = the stdlib security fix for the net/http
+# vulnerability govulncheck flagged on the first run of this repo's
+# gate (fixed in go1.26.11; the extraction started at the monorepo's
+# 1.26.10 pin).
+go = "1.26.11"
+
+# The `tofu` binary — the real-tofu smoke gate in ci.yml (a real CLI
+# driving the real binary; in-process framework tests can't catch a
+# real CLI's rejects) and the acceptance lane's driver
+# (acceptance.yml). Backend aqua:opentofu/opentofu (GitHub release
+# binaries), checksummed in mise.lock like everything else.
+# shellcheck gates the shell scripts; pinned for local/CI parity.
+opentofu = "1.13.9"
+
+# Gates scripts/*.sh (ci.yml runs the runner's preinstalled binary;
+# locally the exact pin keeps the same dialect).
+shellcheck = "0.11.0"
