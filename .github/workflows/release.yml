@@ -252,8 +252,11 @@ jobs:
             shasum -a 256 "$archive" > "SHA256SUMS.${OS_ARCH}"
           fi
           # Normalize regardless of source: strip any binary-mode
-          # marker to the two-space text form.
-          sed -i 's/ \*/  /' "SHA256SUMS.${OS_ARCH}"
+          # marker to the two-space text form. No `sed -i` — BSD sed
+          # (the macOS runners) wants a suffix argument GNU sed
+          # doesn't, and this step must run identically on both.
+          sed 's/ \*/  /' "SHA256SUMS.${OS_ARCH}" > "SHA256SUMS.${OS_ARCH}.tmp"
+          mv "SHA256SUMS.${OS_ARCH}.tmp" "SHA256SUMS.${OS_ARCH}"
           if grep -Eq '^[0-9a-f]{64} \*' "SHA256SUMS.${OS_ARCH}"; then
             echo "::error::binary-mode marker survived normalization in SHA256SUMS.${OS_ARCH} — the registries would drop this platform"
             exit 1
