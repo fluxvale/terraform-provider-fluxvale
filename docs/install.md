@@ -15,7 +15,7 @@ whole set:
 
 ```sh
 grep <your-zip> SHA256SUMS | sha256sum -c -
-# e.g. grep terraform-provider-fluxvale_0.1.0_linux_amd64.zip SHA256SUMS | sha256sum -c -
+# e.g. grep terraform-provider-fluxvale_0.1.1_linux_amd64.zip SHA256SUMS | sha256sum -c -
 #      macOS: … | shasum -a 256 -c -
 ```
 
@@ -30,14 +30,14 @@ filename), and the os/arch names are the registry's vocabulary:
   registry.terraform.io/
     fluxvale/
       fluxvale/
-        terraform-provider-fluxvale_0.1.0_linux_amd64.zip
-        terraform-provider-fluxvale_0.1.0_linux_arm64.zip
-        terraform-provider-fluxvale_0.1.0_darwin_arm64.zip
-        terraform-provider-fluxvale_0.1.0_windows_amd64.zip
+        terraform-provider-fluxvale_0.1.1_linux_amd64.zip
+        terraform-provider-fluxvale_0.1.1_linux_arm64.zip
+        terraform-provider-fluxvale_0.1.1_darwin_arm64.zip
+        terraform-provider-fluxvale_0.1.1_windows_amd64.zip
 ```
 
-Drop the downloaded zips in unchanged — this tree (and the checksum
-check above) is exercised for real by the smoke gate in CI
+Drop the downloaded zips in unchanged — this packed layout is
+exercised for real by the smoke gate in CI
 (`internal/provider/e2e_test.go` builds a packed mirror and runs tofu
 init against it).
 

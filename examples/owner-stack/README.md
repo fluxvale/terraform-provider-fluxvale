@@ -80,17 +80,12 @@ This module composes two providers, so it needs the
 [filesystem mirror](../../docs/install.md) setup. With
 `dev_overrides` alone, `tofu init` queries the registry for the
 unpublished fluxvale provider and fails on that lookup (cloudflare
-itself installs fine) — the mirror is what makes init fully green.
-Two cases:
-
-- **Release zips exist** (GitHub Releases, tag `tf-v*`): follow
-  docs/install.md §1–3 — download the zip + `SHA256SUMS`, verify,
-  drop into `~/.tfplugins-mirror`, point `~/.tofurc` at it.
-- **They don't yet** (the `tf-v0.1.0` run failed before attaching
-  assets): build and zip the provider yourself — `cd apps/tfprovider
-  && go build -o /tmp/terraform-provider-fluxvale_v0.1.0 .` then zip
-  that binary and lay it out per docs/install.md §2. A re-release
-  makes this paragraph obsolete.
+itself installs fine) — the mirror is what makes init fully green:
+download the release zip + `SHA256SUMS`, verify, drop the zip into
+`~/.tfplugins-mirror`, point `~/.tofurc` at it — docs/install.md
+§1–3 walks it (release assets ship from `tf-v0.1.1` on; the
+`tf-v0.1.0` release page is up but empty — its build run failed
+before attaching any).
 
 ## Run and verify
 
