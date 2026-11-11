@@ -1,0 +1,9 @@
+# One review per PR — 0-star OSS tier: ~1 review/hour per
+# developer per repo (docs.coderabbit.ai/management/plans). The
+# org-wide discipline lives in the platform monorepo
+# (fluxvale/fluxvale); this file carries the same shape for this repo.
+reviews:
+  auto_review:
+    # No auto-re-reviews on pushes. Doesn't govern the opening review,
+    # which may auto-fire — the discipline is behavioral.
+    auto_incremental_review: false

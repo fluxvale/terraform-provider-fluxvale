@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fluxvale/fluxvale/apps/tfprovider/internal/client"
+	"github.com/fluxvale/terraform-provider-fluxvale/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -21,7 +21,7 @@ import (
 
 const (
 	// envToken is the documented credential fallback — stable in the
-	// compatibility contract (apps/tfprovider/docs/compatibility.md).
+	// compatibility contract (docs/guides/compatibility.md).
 	envToken = "FLUXVALE_PAT"
 
 	// defaultAPIURL matches the contract's documented default; staging

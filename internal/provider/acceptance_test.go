@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fluxvale/fluxvale/apps/tfprovider/internal/client"
+	"github.com/fluxvale/terraform-provider-fluxvale/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	frameworkresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"

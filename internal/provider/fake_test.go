@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fluxvale/fluxvale/apps/tfprovider/internal/client"
+	"github.com/fluxvale/terraform-provider-fluxvale/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"

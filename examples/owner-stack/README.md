@@ -77,20 +77,19 @@ not a newest-first ranking.
 ## Install the providers (once)
 
 This module composes two providers, so it needs the
-[filesystem mirror](../../docs/install.md) setup. With
+[filesystem mirror](../../docs/guides/install.md) setup. With
 `dev_overrides` alone, `tofu init` queries the registry for the
 unpublished fluxvale provider and fails on that lookup (cloudflare
 itself installs fine) — the mirror is what makes init fully green:
 download the release zip + `SHA256SUMS`, verify, drop the zip into
-`~/.tfplugins-mirror`, point `~/.tofurc` at it — docs/install.md
-§1–3 walks it (release assets ship from `tf-v0.1.1` on; the
-`tf-v0.1.0` release page is up but empty — its build run failed
-before attaching any).
+`~/.tfplugins-mirror`, point `~/.tofurc` at it — docs/guides/install.md
+§1–3 walks it (this repo's releases ship from `v0.2.0` on; the
+monorepo's historical `tf-v0.1.x` releases stay where they were).
 
 ## Run and verify
 
 ```sh
-cd apps/tfprovider/examples/owner-stack
+cd examples/owner-stack
 cp terraform.tfvars.example terraform.tfvars   # then fill it in
 export FLUXVALE_PAT=fvpat_…                    # never in a file
 tofu init                                      # mirror + registry (cloudflare)

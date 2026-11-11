@@ -1,4 +1,4 @@
-module github.com/fluxvale/fluxvale/apps/tfprovider
+module github.com/fluxvale/terraform-provider-fluxvale
 
 go 1.26.10
 

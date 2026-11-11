@@ -1,3 +1,14 @@
-# `go build .` drops the provider binary here (dev_overrides loop) —
-# keep it out of git; every sibling app carries one of these.
-/terraform-provider-fluxvale
+# Build artifacts
+/terraform-provider-fluxvale*
+*.zip
+SHA256SUMS*
+*.sig
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate*
+.crash.log
+
+# Dev
+.tox/

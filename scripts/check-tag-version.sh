@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
 # The release-tag gate (mirrors apps/cli/scripts/check-tag-version.sh):
-# a `tf-v*` tag must carry exactly the version in
+# a `v*` tag must carry exactly the version in
 # internal/provider/version.go — the provider's version source (const
 # Version, wired into the User-Agent and the -version flag). A tag that
 # disagrees with the shipped binary's self-report fails the release, so
-# lazy tags can't ship.
+# lazy tags can't ship. Plain vX.Y.Z only: the registries (Terraform
+# Registry, OpenTofu) list semver tags, and the provider is this repo's
+# sole product — no namespace prefix, unlike the tf-v* scheme the
+# monorepo needed while it shared a tag space with the CLI.
 #
-# Usage: check-tag-version.sh tf-vX.Y.Z [version-go-path]
+# Usage: check-tag-version.sh vX.Y.Z [version-go-path]
 #   The second arg overrides the version.go location — the test seam
 #   for the no-version branch; the release workflow passes none.
 # Exit 0 on match; 1 on mismatch, a foreign tag, or no version at all.
 set -euo pipefail
 
-tag="${1:?usage: check-tag-version.sh tf-vX.Y.Z [version-go-path]}"
+tag="${1:?usage: check-tag-version.sh vX.Y.Z [version-go-path]}"
 
 case "$tag" in
-  tf-v*) version="${tag#tf-v}" ;;
+  v*) version="${tag#v}" ;;
   *)
-    echo "not a tfprovider release tag: '$tag' (want tf-v<version>)" >&2
+    echo "not a tfprovider release tag: '$tag' (want v<version>)" >&2
     exit 1
     ;;
 esac
