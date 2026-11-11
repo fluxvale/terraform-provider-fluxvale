@@ -43,7 +43,7 @@ it, no manual steps: backups rows follow their instance and the
 bucket; the attach calls follow the gateway and each private
 instance.
 
-## The pairing checklist — what Terence brings
+## The pairing checklist — what you bring
 
 | Value | Where it comes from | Goes where |
 | --- | --- | --- |

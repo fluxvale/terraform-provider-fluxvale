@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Proves check-tag-version.sh on fixtures — the same shape
 # apps/cli/scripts/test-check-tag-version.sh runs in the cli lane's
-# gates. Run in the tfprovider lane (ci.yml) so the release gate is
+# gates. Run in the CI gates job (ci.yml) so the release gate is
 # exercised on every provider-touching PR, not only at tag time.
 set -euo pipefail
 

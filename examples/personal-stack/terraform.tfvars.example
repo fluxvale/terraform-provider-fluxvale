@@ -1,5 +1,5 @@
-# Copy to terraform.tfvars and replace every placeholder — the PA
-# collects the owner's real values (#482 acceptance). Secrets can stay
+# Copy to terraform.tfvars and replace every placeholder with your
+# real values. Secrets can stay
 # OUT of this file entirely: FLUXVALE_PAT (environment) is the
 # preferred FluxVale credential, and nothing here is committed.
 

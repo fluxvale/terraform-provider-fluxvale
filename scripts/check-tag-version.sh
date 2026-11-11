@@ -20,7 +20,7 @@ tag="${1:?usage: check-tag-version.sh vX.Y.Z [version-go-path]}"
 case "$tag" in
   v*) version="${tag#v}" ;;
   *)
-    echo "not a tfprovider release tag: '$tag' (want v<version>)" >&2
+    echo "not a provider release tag: '$tag' (want v<version>)" >&2
     exit 1
     ;;
 esac

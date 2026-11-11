@@ -16,7 +16,18 @@ resource "fluxvale_custom_domain" "apps" {
 }
 ```
 
+## Argument Reference
+
+- `domain` (Required) — your own domain (`apps.example.com`). Names are unique platform-wide, across ALL organizations; the platform canonicalizes (trim + downcase), so any config casing converges and only a genuinely different canonical name replaces.
+- `organization` (Optional) — id or slug; the plan normalizes a set value to the resolved id, so a slug config converges with an imported id. Only a genuinely different organization replaces.
+- `wait_for_verification` (Optional, bool) — poll `pending → verified` instead of returning at `pending`; bounded by `timeouts.create` (default 45m).
+
+## Attributes Read
+
+`id`, `kind` (`custom` for provider-created rows; `platform` for system-minted ones), `state`, `organization_id`.
+
 ## Notes
+
 
 - **`verified` is NOT resolution.** Promotion mints the domain's serving arms, but the split-DNS claim — the tailnet-side route that makes the name ANSWER — has no API surface yet. This resource registers, verifies (DNS-01), and tears down, nothing more.
 - `resume` is deliberately not exposed. A `suspended` domain is legacy state: domains are free, nothing current suspends one — the state and its resume survive for old rows only. Watch `state`.
