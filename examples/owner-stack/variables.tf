@@ -67,7 +67,7 @@ variable "tailscale_auth_key" {
 variable "instances" {
   description = <<-EOT
     The instances, keyed by instance name (the key is the name and the backups prefix). Defaults are three representative shapes: a public always-on forgejo, memos and kavita private behind the gateway. Override the whole map in terraform.tfvars to differ.
-    version: the catalog version to deploy, pinned explicitly — the catalog's row order is a version-string sort, not a release order, so there is no "newest row" to track. Bumping the pin replaces the instance (create-only identity) and the replacement's teardown deletes the app-data volume — restore from the R2 backups or lose the data.
+    version: the catalog version to deploy, pinned explicitly — the rows are semver-newest-first now, but a pin survives re-ordering and new releases, which is why it stays explicit. Bumping the pin replaces the instance (create-only identity) and the replacement's teardown deletes the app-data volume — restore from the R2 backups or lose the data.
     retention_keep: days of backups per instance; null is the server's default.
     env_vars: write-only environment for the instance, kept verbatim in state (the API never echoes it). Changing it REPLACES the instance — the API accepts env vars only at create — and the replacement's teardown deletes the app-data volume, same as a pin bump. The catalog marks some app secrets required — umami's 3.4.1-bundled needs APP_SECRET — without which the app runs but stays broken.
     domain: registers a fluxvale_custom_domain for the instance when set — the dogfood pairings (forgejo → git.fluxvale.com, umami → analytics.fluxvale.com) are pending the dogfood plan; the null default registers nothing.

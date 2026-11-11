@@ -26,7 +26,8 @@ resource "fluxvale_instance_backups" "memos" {
 ## Argument Reference
 
 - `instance_id` (Required) — the instance whose backups this routes.
-- `endpoint` / `bucket` / `prefix` (Required) — the S3-compatible destination coordinates.
+- `endpoint` / `bucket` (Required) — the S3-compatible destination coordinates.
+- `prefix` (Optional) — the per-instance prefix inside the bucket.
 - `access_key_id` (Required) / `secret_access_key` (Optional, write-only, Sensitive) — the credential. `secret_access_key`: set ⇒ applied (or rotated) with the save; unset ⇒ the stored credential is kept. A FIRST create without it lands quota-only (the API's permissive shape) and backups won't run until a later save supplies it. Kept verbatim in state — the API never echoes it.
 - `retention_keep` (Optional) — how many snapshots to keep.
 - `enabled` (Optional, bool) — the pause switch.

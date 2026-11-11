@@ -22,9 +22,9 @@ tailscale_auth_key = null
 # whole map to differ. version pins the catalog release to deploy
 # (bumping the pin REPLACES the instance and the old instance's
 # app-data volume is deleted in the teardown — restore from the R2
-# backups or the data is gone; the catalog's row order is a string
-# sort, not a release order, so pick pins from the listing, never
-# "the first row"). Sizes: catalog classes are micro 0.25/512, small
+# backups or the data is gone; the catalog is semver-newest-first now,
+# but pick pins from the listing deliberately, never "the first
+# row"). Sizes: catalog classes are micro 0.25/512, small
 # 0.5/512, medium 0.5/1024, standard 1.0/2048, plus 2.0/4096, pro
 # 4.0/8192.
 instances = {

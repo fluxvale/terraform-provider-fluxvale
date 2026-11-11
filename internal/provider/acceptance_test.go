@@ -90,7 +90,7 @@ func accVars(t *testing.T) config.Variables {
 func accPreCheck(t *testing.T) {
 	t.Helper()
 	if os.Getenv("TF_ACC_API_URL") == "" || os.Getenv("TF_ACC_PAT") == "" {
-		t.Fatalf("TF_ACC_API_URL and TF_ACC_PAT must be set — mint a PAT per docs/deployment.md " +
+		t.Fatalf("TF_ACC_API_URL and TF_ACC_PAT must be set — mint a PAT on the platform " +
 			"(scopes instances:write backups:write gateways:write + catalog:read; the org must have paid once for backups)")
 	}
 }

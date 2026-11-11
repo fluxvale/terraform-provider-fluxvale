@@ -22,6 +22,7 @@ resource "fluxvale_access_gateway" "org" {
 
 - `tailnet_domain` (Required) — the tailnet the gateway joins.
 - `auth_key` (Optional, Sensitive) — the join credential, required only when this resource ENABLES a gateway (the wire never echoes it, so imports manage attachments with it null).
+- `organization` (Optional) — id or slug; falls back to the provider-level `organization`, then to your sole org. The singleton is resolved per org.
 - `instances` (Optional, set of instance ids) — converges via the attach/detach verbs, one call per added/removed id. Attaching waits the gateway to `active` (create lands `provisioning`; the observer promotes within about a minute). The set is config-authoritative: the API has no attachment list, so out-of-band panel attach/detach is invisible to the provider.
 
 ## Attributes Read

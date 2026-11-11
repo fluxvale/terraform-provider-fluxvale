@@ -166,25 +166,14 @@ jobs:
 
       # The registry manifest: schema v1, protocol 6.0 (the provider is
       # pure terraform-plugin-framework — no sdkv2, no protocol 5).
-      # Written per leg but NOT zipped: the registry convention (verify
-      # against live provider releases — github/datadog/docker) uploads
-      # it as a VERSIONED release asset,
-      # terraform-provider-fluxvale_<version>_manifest.json, and the
-      # zips carry only the binary. Publish names it, checksums it,
-      # and attaches it.
-      - name: Write the registry manifest
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          cat > "terraform-provider-fluxvale_${VERSION}_manifest.json" <<'EOF'
-          {
-            "version": 1,
-            "metadata": {
-              "protocol_versions": ["6.0"]
-            }
-          }
-          EOF
-          cat "terraform-provider-fluxvale_${VERSION}_manifest.json"
+      # Written ONCE, in publish — never per matrix leg: a same-named
+      # file uploaded by four legs and merged with merge-multiple is
+      # the download-artifact corruption class (upstream #395/#298),
+      # and the checksum gate can't catch a corrupted-then-hashed
+      # file. Publish owns the manifest, its checksum line, and its
+      # upload; the zips carry only the binary (the convention the
+      # registries and live provider releases settle).
+      # (This step lives in the publish job below.)
 
       # Registry-shaped archive, two levels of naming (see the header):
       # the zip keeps its `_<version>_<os>_<arch>` name; the binary is
@@ -259,7 +248,6 @@ jobs:
           name: release-${{ matrix.leg.name }}
           path: |
             terraform-provider-fluxvale_*.zip
-            terraform-provider-fluxvale_*_manifest.json
             SHA256SUMS.*
           if-no-files-found: error
 
@@ -288,6 +276,24 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: dist
+
+      # The registry manifest — written HERE, once, by the single job
+      # that checksums and uploads it (see the build job's note for
+      # why four legs each writing it is the corruption class).
+      - name: Write the registry manifest
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="${REF_NAME#v}"
+          cat > "dist/terraform-provider-fluxvale_${version}_manifest.json" <<'EOF'
+          {
+            "version": 1,
+            "metadata": {
+              "protocol_versions": ["6.0"]
+            }
+          }
+          EOF
+          cat "dist/terraform-provider-fluxvale_${version}_manifest.json"
 
       - name: Merge and verify the checksums
         env:

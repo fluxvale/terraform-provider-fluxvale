@@ -83,7 +83,8 @@ This module composes two providers, so it needs the
 `dev_overrides` alone, `tofu init` queries the registry for the
 unpublished fluxvale provider and fails on that lookup (cloudflare
 itself installs fine) — the mirror is what makes init fully green:
-download the release zip + `SHA256SUMS`, verify, drop the zip into
+download the release zip + the versioned `*_SHA256SUMS` (+
+`*_SHA256SUMS.sig`), verify, drop the zip into
 `~/.tfplugins-mirror`, point `~/.tofurc` at it — docs/guides/install.md
 §1–3 walks it (this repo's releases ship from `v0.2.0` on; the
 monorepo's historical `tf-v0.1.x` releases stay where they were).

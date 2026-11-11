@@ -9,8 +9,9 @@ verbatim, never pre-empted client-side.
 Extracted from the [FluxVale platform monorepo](https://github.com/fluxvale/fluxvale)
 (`apps/tfprovider` there — [ADR-0019](https://github.com/fluxvale/fluxvale/blob/main/docs/adr/00019-machine-first-api-cli-mcp.md)
 Am. 4 and the extraction ADR beside it in the monorepo's index) so
-both provider registries can list it: plain `vX.Y.Z` tags, GPG-signed
-`SHA256SUMS`, and the registry manifest inside every release zip.
+both provider registries can list it: plain `vX.Y.Z` tags and the
+registries' release-asset convention — per-platform zips (binary
+only) plus the versioned manifest, checksums, and GPG signature.
 
 ## Documentation
 
