@@ -1,3 +1,7 @@
+---
+page_title: "Compatibility contract"
+---
+
 # Compatibility contract
 
 STABLE from day one — renaming any of these is a breaking change, never

@@ -27,11 +27,11 @@ provider page, per-resource and per-data-source pages, and the
 ## Releases
 
 Tagged `vX.Y.Z` on this repo's [Releases](https://github.com/fluxvale/terraform-provider-fluxvale/releases):
-four registry-shaped zips (linux amd64/arm64, darwin arm64, windows
-amd64), each carrying the binary and
-`terraform-provider-registry-manifest.json`, plus the merged
-`SHA256SUMS` and its GPG signature `SHA256SUMS.sig` — verifiable
-against the committed
+four platform zips (linux amd64/arm64, darwin arm64, windows amd64)
+carrying only the binary, plus the registry's versioned assets —
+`terraform-provider-fluxvale_<version>_manifest.json` (protocol 6.0),
+`_SHA256SUMS` covering the zips and the manifest, and the binary GPG
+signature `_SHA256SUMS.sig`, verifiable against the committed
 [`terraform-provider-signing.asc`](terraform-provider-signing.asc).
 
 ## Dev loop

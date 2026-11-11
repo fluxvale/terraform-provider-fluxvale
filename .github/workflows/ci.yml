@@ -61,6 +61,18 @@ jobs:
 
       - run: go build ./...
 
+      # Go vulnerability scanning — re-homed from the platform
+      # monorepo's nightly pentest dep-audit when the provider left
+      # that repo (its govulncheck half was exactly this gate).
+      # govulncheck exits non-zero on CALLED vulnerabilities (exit 3)
+      # and on broken runs (1/2); import-only findings stay green —
+      # the same severity posture the monorepo script ran.
+      - name: govulncheck
+        run: |
+          gov_bin="$(mktemp -d)"
+          GOBIN="$gov_bin" go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          "$gov_bin/govulncheck" ./...
+
       # The release-tag gate's fixtures, proven here on every PR — the
       # same shape the monorepo's provider lane ran.
       - run: ./scripts/test-check-tag-version.sh

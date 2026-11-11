@@ -21,8 +21,8 @@ import (
 
 // Acceptance tests: REAL resources against a REAL FluxVale org
 // (#482's acceptance lane). NEVER per-PR — every step creates real,
-// billing platform rows, so this runs nightly, on tf-v* tags, and on
-// demand (.github/workflows/tfprovider-acceptance.yml); the secret it
+// billing platform rows, so this runs nightly, on v* tags, and on
+// demand (.github/workflows/acceptance.yml); the secret it
 // needs minting is listed in that workflow's comments.
 //
 // Environment:
@@ -109,7 +109,7 @@ func accSkip(t *testing.T, test string, envs ...string) {
 	t.Helper()
 	for _, e := range envs {
 		if os.Getenv(e) == "" {
-			t.Skipf("%s skipped — %s is not set (the PA mints it per docs/deployment.md)", test, e)
+			t.Skipf("%s skipped — %s is not set (mint it per the scopes in .github/workflows/acceptance.yml preflight)", test, e)
 		}
 	}
 }

@@ -6,7 +6,7 @@
 # the abandoned CI path in AGENTS.md). During GitHub's 2026-11-09
 # anonymous-traffic 504 incident (githubstatus incident c9px7cw2ghrs,
 # "CI jobs and release downloads may fail with a 504 … if they make
-# anonymous calls") that meant every e2e/smoke/tfprovider job died ~1
+# anonymous calls") that meant every e2e/smoke job died ~1
 # minute in, all retries spent.
 #
 # This action stages ~/.local/share/mise (binary + installs) from an
@@ -73,8 +73,9 @@ inputs:
     required: true
   cache-suffix:
     description: >-
-      Lane segment of the cache key (e2e / tfprovider / smoke /
-      pentest). Jobs with different tool sets must NOT share an entry:
+      Lane segment of the cache key (provider CI / acceptance — the
+      two lanes of this repo, identical toolsets, sharing one entry).
+      Jobs with different tool sets must NOT share an entry:
       the exact key's first saver wins, and a partial toolset would pin
       every other lane to cold tool installs forever.
     required: true

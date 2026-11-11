@@ -33,11 +33,12 @@ TFPROVIDER_E2E=1 mise x -- go test ./internal/provider -run TestRealTofuSmoke -c
 - The bump carries its doc sweep: `docs/guides/install.md` and the
   platform monorepo's `docs/public/automation/terraform.md` name the
   concrete archives.
-- The release workflow packs `terraform-provider-registry-manifest.json`
-  into every zip and GPG-signs `SHA256SUMS` with the company key
-  (public key committed at `terraform-provider-signing.asc`; the
-  private half lives in 1Password and in the `GPG_PRIVATE_KEY`
-  Actions secret).
+- The release asset set is the registry convention: per-platform zips
+  (binary only) + versioned `_manifest.json`, `_SHA256SUMS` (covering
+  zips and manifest), and the binary GPG signature `_SHA256SUMS.sig`
+  over the company key (public key committed at
+  `terraform-provider-signing.asc`; the private half lives in
+  1Password and in the `GPG_PRIVATE_KEY` Actions secret).
 
 ## Compatibility contract
 

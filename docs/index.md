@@ -17,11 +17,13 @@ provider "fluxvale" {
   # api_url = "https://staging.fluxvale.com"  # staging override; default https://fluxvale.com
 }
 
-data "fluxvale_apps" "all" {}
-
 resource "fluxvale_instance" "kavita" {
+  name        = "Kavita"
   app         = "kavita"
   app_version = "3.4.1" # pin explicitly — the catalog's row order is not a release order
+  cpu_cores   = 1
+  memory_mb   = 512
+  storage_gb  = 10
 }
 ```
 

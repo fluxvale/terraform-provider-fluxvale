@@ -45,7 +45,7 @@ func TestMeSendsAuthHeaderAndUserAgent(t *testing.T) {
 	if gotAccept != "application/vnd.api+json" {
 		t.Errorf("Accept = %q, want JSON:API content type", gotAccept)
 	}
-	wantUA := "terraform-provider-fluxvale/0.1.0-test (+https://github.com/fluxvale/fluxvale)"
+	wantUA := "terraform-provider-fluxvale/0.1.0-test (+https://github.com/fluxvale/terraform-provider-fluxvale)"
 	if gotUA != wantUA {
 		t.Errorf("User-Agent = %q, want %q", gotUA, wantUA)
 	}

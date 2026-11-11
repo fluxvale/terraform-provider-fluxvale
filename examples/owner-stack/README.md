@@ -58,7 +58,7 @@ instance.
 | `instances[].domain` | the dogfood plan — `git.fluxvale.com` (forgejo) and `analytics.fluxvale.com` (umami) are the placeholder pairings | optional, `terraform.tfvars` — left unset until that plan lands |
 
 The token scopes match the workflow's acceptance preflight
-(`.github/workflows/tfprovider-acceptance.yml`); mint once, reuse.
+(`.github/workflows/acceptance.yml`); mint once, reuse.
 
 To see the catalog while picking apps and version pins (after
 `tofu init` and with `FLUXVALE_PAT` exported — the console reads the

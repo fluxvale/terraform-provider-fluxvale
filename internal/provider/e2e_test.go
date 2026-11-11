@@ -38,7 +38,7 @@ import (
 // that catches the docs-rot class: a mirror tree the docs teach but
 // tofu refuses.
 //
-// Gated by TFPROVIDER_E2E=1 (set by ci.yml's tfprovider lane; skipped
+// Gated by TFPROVIDER_E2E=1 (set by ci.yml's gates job; skipped
 // locally without it). Requires `tofu` on PATH — `mise install
 // opentofu` (the mise.toml pin) — and works offline: no registry
 // contact in either phase.

@@ -2,10 +2,13 @@
 # tfprovider-release.yml (fluxvale/fluxvale) and made registry-ready:
 # plain vX.Y.Z tags (the registries list semver; the provider is this
 # repo's sole product, so the tf-v* namespace the monorepo needed is
-# gone), terraform-provider-registry-manifest.json inside every zip
-# (the registry's packing requirement), and a GPG-detached signature
-# over SHA256SUMS (SHA256SUMS.sig — what the Terraform Registry
-# verifies when the listing goes live; OpenTofu's registry mirrors it).
+# gone), and the registry's release-asset shape — the convention the
+# official scaffolding and live provider releases (github/datadog/
+# docker) settle: one zip per platform carrying ONLY the binary, plus
+# versioned terraform-provider-fluxvale_<version>_manifest.json,
+# _SHA256SUMS (covering the zips AND the manifest), and the BINARY
+# GPG-detached _SHA256SUMS.sig (the registry spec: binary, not
+# ASCII-armored) over a dedicated company key.
 #
 # Version wiring: the tag NAMES the release; the BINARY's version comes
 # from the const in internal/provider/version.go (one source — main.go
@@ -21,8 +24,9 @@
 # directory in mirror use — and the binary INSIDE is
 # `terraform-provider-fluxvale_v<version>` (the `v` lives on the
 # binary; `.exe` rides it on Windows — tofu's providercache presumes
-# the extension on Windows packages). The manifest sits beside the
-# binary at the zip root: exactly two entries, asserted.
+# the extension on Windows packages). The zip carries ONLY the binary
+# (one entry, asserted); the manifest is its own versioned release
+# asset, not a zip member.
 #
 # Signing: a dedicated company key (public key committed at
 # terraform-provider-signing.asc; the private half lives in 1Password
@@ -162,11 +166,17 @@ jobs:
 
       # The registry manifest: schema v1, protocol 6.0 (the provider is
       # pure terraform-plugin-framework — no sdkv2, no protocol 5).
-      # Written per leg so it rides every zip; the registries read it
-      # from inside the archive at listing time.
+      # Written per leg but NOT zipped: the registry convention (verify
+      # against live provider releases — github/datadog/docker) uploads
+      # it as a VERSIONED release asset,
+      # terraform-provider-fluxvale_<version>_manifest.json, and the
+      # zips carry only the binary. Publish names it, checksums it,
+      # and attaches it.
       - name: Write the registry manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          cat > terraform-provider-registry-manifest.json <<'EOF'
+          cat > "terraform-provider-fluxvale_${VERSION}_manifest.json" <<'EOF'
           {
             "version": 1,
             "metadata": {
@@ -174,16 +184,18 @@ jobs:
             }
           }
           EOF
-          cat terraform-provider-registry-manifest.json
+          cat "terraform-provider-fluxvale_${VERSION}_manifest.json"
 
-      # Registry-shaped archive, two levels (see the header): the zip
-      # keeps its `_<version>_<os>_<arch>` name; the binary is STAGED
-      # under the registry's inner name — `terraform-provider-fluxvale_v<version>`
-      # — flat at the zip root beside the manifest. The proof ASSERTS
-      # the exact entry list (binary + manifest, nothing else). zip on
-      # ALL platforms: the runner's zip on unix, PowerShell's
-      # Compress-Archive on Windows (no zip.exe there).
-      - name: Archive the binary + manifest (unix)
+      # Registry-shaped archive, two levels of naming (see the header):
+      # the zip keeps its `_<version>_<os>_<arch>` name; the binary is
+      # STAGED under the registry's inner name —
+      # `terraform-provider-fluxvale_v<version>` — flat at the zip
+      # root, and the zip carries NOTHING else (the convention the
+      # registries and filesystem mirrors expect; the manifest rides
+      # as its own release asset, not inside the zip). The proof
+      # ASSERTS the exact entry list with BOTH sides sorted — an
+      # order-vs-alphabetical mismatch once reded every unix leg.
+      - name: Archive the binary (unix)
         if: runner.os != 'Windows'
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -192,16 +204,16 @@ jobs:
           archive="terraform-provider-fluxvale_${VERSION}_${OS_ARCH}.zip"
           inner="terraform-provider-fluxvale_v${VERSION}"
           cp "${{ matrix.leg.binary }}" "$inner"
-          zip -q "$archive" "$inner" terraform-provider-registry-manifest.json
+          zip -q "$archive" "$inner"
           entries="$(unzip -Z1 "$archive" | sort)"
           echo "archive entries: $entries"
-          want="$(printf '%s\n%s\n' terraform-provider-registry-manifest.json "$inner")"
+          want="$(printf '%s\n' "$inner" | sort)"
           if [ "$entries" != "$want" ]; then
             echo "::error::$archive entries = [$entries], want exactly [$want]"
             exit 1
           fi
 
-      - name: Archive the binary + manifest (windows)
+      - name: Archive the binary (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -214,22 +226,20 @@ jobs:
           # file is detected as the executable but fails to run.
           $inner = "terraform-provider-fluxvale_v${env:VERSION}.exe"
           Copy-Item "${{ matrix.leg.binary }}" $inner
-          Compress-Archive -Path $inner, terraform-provider-registry-manifest.json -DestinationPath $archive
-          # Flat-entry proof: exactly two root entries, the registry-named
-          # binary and the manifest.
+          Compress-Archive -Path $inner -DestinationPath $archive
+          # Flat-entry proof: exactly one root entry, the registry-named
+          # binary (the manifest is a release asset, not a zip member).
           $entries = ([System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $archive))).Entries |
             Select-Object -ExpandProperty FullName | Sort-Object
           Write-Host "archive entries: $entries"
-          $want = @("terraform-provider-fluxvale_v$($env:VERSION).exe", "terraform-provider-registry-manifest.json") | Sort-Object
-          if ("$entries" -ne "$want") {
-            Write-Error "::error::$archive entries = [$entries], want exactly [$want]"
+          if ("$entries" -ne "$inner") {
+            Write-Error "::error::$archive entries = [$entries], want exactly [$inner]"
             exit 1
           }
 
-      # Per-leg checksum file (SHA256SUMS.<os>_<arch>); the publish job
-      # concatenates the parts and runs `sha256sum -c` over the whole
-      # set before anything attaches to a release. shasum is macOS's
-      # fallback (same `<hash>  <file>` format).
+      # Per-leg checksum part (the zip only); publish merges the parts,
+      # appends the manifest's line, and signs the versioned whole.
+      # shasum is macOS's fallback (same `<hash>  <file>` format).
       - name: Checksum the archive
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -249,6 +259,7 @@ jobs:
           name: release-${{ matrix.leg.name }}
           path: |
             terraform-provider-fluxvale_*.zip
+            terraform-provider-fluxvale_*_manifest.json
             SHA256SUMS.*
           if-no-files-found: error
 
@@ -279,12 +290,20 @@ jobs:
           path: dist
 
       - name: Merge and verify the checksums
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
+          version="${REF_NAME#v}"
           cd dist
-          cat SHA256SUMS.* > SHA256SUMS
+          cat SHA256SUMS.* > "terraform-provider-fluxvale_${version}_SHA256SUMS"
           rm SHA256SUMS.*
-          cat SHA256SUMS
-          sha256sum -c SHA256SUMS
+          # The manifest is a checksummed release asset like the zips
+          # (the scaffolding convention: checksum.extra_files) — one
+          # line, appended here so it appears exactly once no matter
+          # how many legs wrote parts.
+          sha256sum "terraform-provider-fluxvale_${version}_manifest.json" >> "terraform-provider-fluxvale_${version}_SHA256SUMS"
+          cat "terraform-provider-fluxvale_${version}_SHA256SUMS"
+          sha256sum -c "terraform-provider-fluxvale_${version}_SHA256SUMS"
 
       # The registry layout wants one zip per os_arch — name the four,
       # never a glob that could quietly match three.
@@ -302,24 +321,29 @@ jobs:
 
       # Registry signing: import the company key from the Actions
       # secret (held in 1Password as the source of truth), detach-sign
-      # the merged SHA256SUMS, then PROVE the signature against the
+      # the versioned SHA256SUMS in BINARY form (the registry spec: a
+      # binary, not ASCII-armored, detached signature — --armor would
+      # write .asc and the registries would refuse it), pinned to the
+      # company key id so an accidentally-populated keyring can never
+      # pick a different signer. Then PROVE the signature against the
       # committed public key — verified in a FRESH GNUPGHOME holding
       # only the committed key, so the release can never ship a
-      # signature the committed key can't verify. The secret never
-      # echoes: env-indirected, piped to gpg. Every gpg call is
-      # --batch --pinentry-mode loopback: no passphrase to prompt (the
-      # key has none) and no interactive fallback can ever fire —
-      # non-interactive or the step reds, never a dialog.
+      # signature the committed key can't verify. The key has NO
+      # passphrase by design (the private material is the secret), so
+      # no prompt path exists; every gpg call is --batch with loopback
+      # pinentry — non-interactive or the step reds, never a dialog.
       - name: Sign the checksums
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
+          version="${REF_NAME#v}"
           printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --pinentry-mode loopback --import
           cd dist
-          gpg --batch --pinentry-mode loopback --yes --detach-sig --armor SHA256SUMS
+          gpg --batch --pinentry-mode loopback --yes --local-user 0B835C3828029111 --detach-sig "terraform-provider-fluxvale_${version}_SHA256SUMS"
           proof_home="$(mktemp -d)"
           GNUPGHOME="$proof_home" gpg --batch --pinentry-mode loopback --import ../terraform-provider-signing.asc
-          GNUPGHOME="$proof_home" gpg --batch --pinentry-mode loopback --verify SHA256SUMS.sig SHA256SUMS
+          GNUPGHOME="$proof_home" gpg --batch --pinentry-mode loopback --verify "terraform-provider-fluxvale_${version}_SHA256SUMS.sig" "terraform-provider-fluxvale_${version}_SHA256SUMS"
           rm -rf "$proof_home"
 
       # Install primer: manual-first until the registries list us (the
@@ -330,15 +354,14 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
-          version="${REF_NAME#v}"
           cat > notes.md <<EOF
           ## Install
 
           Until the registry listing goes live, install from this release into a
           [filesystem mirror](https://opentofu.org/docs/cli/config/files/): download the zip for
-          your platform, verify your line of the merged \`SHA256SUMS\`
-          (\`grep <your-zip> SHA256SUMS | sha256sum -c -\`) — the signature over the whole set is
-          \`SHA256SUMS.sig\`, verifiable against the committed
+          your platform, verify your line of the versioned checksums
+          (\`grep <your-zip> terraform-provider-fluxvale_*_SHA256SUMS | sha256sum -c -\`) — the
+          signature over the whole set is the \`.sig\` beside it, verifiable against the committed
           [\`terraform-provider-signing.asc\`](${REPO_URL}/blob/${REF_NAME}/terraform-provider-signing.asc).
 
           The full copy-paste recipe — mirror layout, checksum verify, the CLI
@@ -356,12 +379,16 @@ jobs:
       # v3.0.3 — pinned to the SAME commit the monorepo's release
       # lanes use: one reviewed action version across the org. Notes:
       # the static primer (composed above), not auto-generated notes.
+      # The versioned asset names are the registry's convention
+      # (manifest, SHA256SUMS, SHA256SUMS.sig — all carrying the
+      # version, so releases coexist unambiguously).
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: ${{ steps.title.outputs.name }}
           body_path: notes.md
           files: |
             dist/terraform-provider-fluxvale_*.zip
-            dist/SHA256SUMS
-            dist/SHA256SUMS.sig
+            dist/terraform-provider-fluxvale_*_manifest.json
+            dist/terraform-provider-fluxvale_*_SHA256SUMS
+            dist/terraform-provider-fluxvale_*_SHA256SUMS.sig
           fail_on_unmatched_files: true

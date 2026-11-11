@@ -1,8 +1,8 @@
 # Toolchain for the FluxVale Terraform/OpenTofu provider.
 # The platform monorepo (fluxvale/fluxvale) carries the BEAM/Node pins;
-# this repo needs exactly two tools: the Go that builds the provider
-# and the OpenTofu CLI that gates it (fmt, the real-tofu smoke, and
-# the acceptance lane's driver).
+# this repo pins its own small set: the Go that builds the provider,
+# the OpenTofu CLI that gates it (fmt, the real-tofu smoke, the
+# acceptance lane's driver), and shellcheck for the scripts.
 
 [settings]
 # mise.lock pins download URLs + checksums per platform, so installs

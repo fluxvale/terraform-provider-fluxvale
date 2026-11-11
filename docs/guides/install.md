@@ -1,3 +1,7 @@
+---
+page_title: "Installing the provider"
+---
+
 # Installing the provider
 
 Manual-first until the registry listing goes live ([ADR-0019](https://github.com/fluxvale/fluxvale/blob/main/docs/adr/00019-machine-first-api-cli-mcp.md)
@@ -11,17 +15,19 @@ init` / `tofu init` replaces this whole page.
 
 Grab the zip for your platform from the repo's
 [Releases](https://github.com/fluxvale/terraform-provider-fluxvale/releases) (tag `v*`)
-plus `SHA256SUMS` (one merged file covering all four platforms) and
-`SHA256SUMS.sig` (the GPG signature over the sums, verifiable against
-the committed [`terraform-provider-signing.asc`](https://github.com/fluxvale/terraform-provider-fluxvale/blob/main/terraform-provider-signing.asc)),
+plus the versioned checksums (`terraform-provider-fluxvale_<version>_SHA256SUMS`,
+covering all four platform zips and the manifest) and its GPG signature
+(`terraform-provider-fluxvale_<version>_SHA256SUMS.sig` — a binary detached
+signature, verifiable against the committed
+[`terraform-provider-signing.asc`](https://github.com/fluxvale/terraform-provider-fluxvale/blob/main/terraform-provider-signing.asc)),
 and verify YOUR line of the sums — a single-platform download can't
 check the whole set:
 
 ```sh
-grep <your-zip> SHA256SUMS | sha256sum -c -
-# e.g. grep terraform-provider-fluxvale_0.2.0_linux_amd64.zip SHA256SUMS | sha256sum -c -
+grep <your-zip> terraform-provider-fluxvale_0.2.0_SHA256SUMS | sha256sum -c -
+# e.g. grep terraform-provider-fluxvale_0.2.0_linux_amd64.zip terraform-provider-fluxvale_0.2.0_SHA256SUMS | sha256sum -c -
 #      macOS: … | shasum -a 256 -c -
-gpg --verify SHA256SUMS.sig SHA256SUMS   # after importing the public key:
+gpg --verify terraform-provider-fluxvale_0.2.0_SHA256SUMS.sig terraform-provider-fluxvale_0.2.0_SHA256SUMS   # after importing the public key:
 # gpg --import https://github.com/fluxvale/terraform-provider-fluxvale/raw/main/terraform-provider-signing.asc
 ```
 
@@ -106,9 +112,15 @@ No `init` required (OpenTofu warns that init is unnecessary with dev
 overrides); rebuild + re-run. See the README's dev-loop section for
 the debugger-attached variant (`go run . -debug`).
 
-## The registry, later
+## The registry switch
 
-The eventual switch is a dedicated registry repository with GPG-signed
-releases — deferred until there are users beyond the owner (the
-compatibility contract in [compatibility.md](compatibility.md) is what
-makes that switch non-breaking).
+This repo IS the registry repository — extracted for exactly that
+([ADR-0051](https://github.com/fluxvale/fluxvale/blob/main/docs/adr/00051-tfprovider-repo-extraction.md)):
+plain `vX.Y.Z` tags, GPG-signed checksums, the registry manifest per
+release. What remains is the listing itself — a manual org-connect
+step on the registry side. Once it goes live, `terraform init` /
+`tofu init` replaces this whole page, and the mirror recipe above
+becomes the fallback for pinned, offline, or pre-listing installs
+(the compatibility contract in
+[compatibility.md](compatibility.md) is what makes that switch
+non-breaking).

@@ -1,3 +1,7 @@
+---
+page_title: "fluxvale_apps"
+---
+
 # fluxvale_apps (data source)
 
 The catalog: every app FluxVale can deploy.
@@ -11,6 +15,10 @@ output "app_slugs" {
   value = [for app in data.fluxvale_apps.all.apps : app.slug]
 }
 ```
+
+## Argument Reference
+
+None — the data source reads the whole catalog.
 
 ## Attributes
 

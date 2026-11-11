@@ -17,7 +17,7 @@ import (
 
 const (
 	contentTypeJSONAPI = "application/vnd.api+json"
-	userAgentFormat    = "terraform-provider-fluxvale/%s (+https://github.com/fluxvale/fluxvale)"
+	userAgentFormat    = "terraform-provider-fluxvale/%s (+https://github.com/fluxvale/terraform-provider-fluxvale)"
 )
 
 // Client calls the FluxVale API with a bearer PAT.

@@ -1,3 +1,7 @@
+---
+page_title: "fluxvale_instance"
+---
+
 # fluxvale_instance
 
 Deploys a catalog app version.
@@ -7,23 +11,36 @@ The name, the version identity, and the organization are create-only (the API ha
 ## Example Usage
 
 ```hcl
+data "fluxvale_app_versions" "memos" {
+  app = "memos"
+}
+
 resource "fluxvale_instance" "memos" {
-  app         = "memos"
-  app_version = "0.27.0"
-  organization = "my-org"          # optional: id or slug; falls back to the provider block, then your sole org
-  cpu_cores   = 1
-  memory_mb   = 512
-  storage_gb  = 10
-  running     = true
-  exposure    = "private"          # behind the access gateway
+  name         = "Memos"
+  app          = "memos"
+  app_version  = data.fluxvale_app_versions.memos.app_versions[0].version
+  organization = "my-org" # optional: id or slug; falls back to the provider block, then your sole org
+  cpu_cores    = 1
+  memory_mb    = 512
+  storage_gb   = 10
+  running      = true
+  exposure     = "private" # behind the access gateway
 }
 ```
 
-## Notes
+## Argument Reference
 
-- `env_vars` is write-only: the API never echoes it, so plan can't see server-side drift by design, and the configured value is kept verbatim in state.
-- `organization` (id or slug) falls back to the provider-level `organization`, then to your sole organization — several memberships without a name is an error, never a silent pick. The resolved `organization_id` (and `app_version_id`) are computed and ride the wire.
-- The `app`/`app_version` slugs you pin are preconditioned against the catalog at plan — bumping the version replaces the instance.
+- `name` (Required) — the instance's display name. Create-only: changing it replaces the instance.
+- `app` / `app_version` (Optional) — the catalog app slug and the version string; the slug form of `app_version_id`. Create-only. Either pin the exact version or resolve it through the [`fluxvale_app_versions`](../data-sources/app_versions.md) data source — the catalog's row order is a version-string sort, not a release order, so no "first row" shortcut exists.
+- `app_version_id` (Optional) — the id form; computed when the slug pair is set.
+- `cpu_cores` (Required, Float64) / `memory_mb` (Required) / `storage_gb` (Required) — the allocation. Resizes in place (storage up-only).
+- `env_vars` (Optional, map, write-only) — the API never echoes it, so plan can't see server-side drift by design, and the configured value is kept verbatim in state.
+- `running` (Optional, bool) / `always_on` (Optional, bool) / `exposure` (Optional) — update in place.
+- `organization` (Optional) — id or slug; falls back to the provider-level `organization`, then to your sole organization (several memberships without a name is an error, never a silent pick).
+
+## Attributes Read
+
+`id`, `slug`, `namespace`, `status`, `port`, `image`, `deployed_at`, `organization_id`, `app_version_id` — the wire's echo, computed.
 
 ## Import
 

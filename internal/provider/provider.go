@@ -33,8 +33,10 @@ var _ provider.Provider = (*fluxvaleProvider)(nil)
 
 // fluxvaleProvider implements provider.Provider.
 type fluxvaleProvider struct {
-	// version is the binary's version (wired at release build time via
-	// -ldflags); it rides the client's User-Agent.
+	// version is the binary's version — the const in version.go, set
+	// at build (no ldflags: the release workflow asserts the binary
+	// itself reports the tag's version); it rides the client's
+	// User-Agent.
 	version string
 }
 

@@ -1,3 +1,7 @@
+---
+page_title: "fluxvale_custom_domain"
+---
+
 # fluxvale_custom_domain
 
 Your own domain on the private-access edge (`apps.example.com`).
