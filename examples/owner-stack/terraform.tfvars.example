@@ -1,0 +1,43 @@
+# Copy to terraform.tfvars and fill in your real values (the copy is
+# gitignored — this directory's .gitignore). The FluxVale PAT does NOT
+# go in this file: export FLUXVALE_PAT instead (README.md). Placeholder
+# strings fail the providers' format checks — expected until filled.
+
+# Staging rehearsal: https://staging.fluxvale.com (with a staging PAT)
+api_url = "https://fluxvale.com"
+
+cloudflare_api_token  = "REPLACE_ME_CLOUDFLARE_API_TOKEN"
+cloudflare_account_id = "REPLACE_ME_CLOUDFLARE_ACCOUNT_ID"
+r2_bucket_name        = "fluxvale-backups" # any name unique in the account
+r2_access_key_id      = "REPLACE_ME_R2_ACCESS_KEY_ID"
+r2_secret_access_key  = "REPLACE_ME_R2_SECRET_ACCESS_KEY"
+
+tailnet_domain = "REPLACE-ME.ts.net" # the tailnet's MagicDNS suffix
+# Set when ENABLING the gateway (a fresh create). Null when ADOPTING an
+# existing one by import — a value there plans a rejected replacement.
+tailscale_auth_key = null
+
+# The instances, keyed by name (= the backups prefix). The default
+# three below are the skeleton's representative shapes — override the
+# whole map to differ. version pins the catalog release to deploy
+# (bumping the pin REPLACES the instance and the old instance's
+# app-data volume is deleted in the teardown — restore from the R2
+# backups or the data is gone; the catalog's row order is a string
+# sort, not a release order, so pick pins from the listing, never
+# "the first row"). Sizes: catalog classes are micro 0.25/512, small
+# 0.5/512, medium 0.5/1024, standard 1.0/2048, plus 2.0/4096, pro
+# 4.0/8192.
+instances = {
+  forgejo = { app = "forgejo", version = "16.0.5", cpu_cores = 1.0, memory_mb = 2048, storage_gb = 10, exposure = "public", always_on = true, running = true, retention_keep = 14, env_vars = null, domain = null }
+  memos   = { app = "memos", version = "26.11.0", cpu_cores = 0.25, memory_mb = 512, storage_gb = 5, exposure = "private", always_on = false, running = true, retention_keep = null, env_vars = null, domain = null }
+  kavita  = { app = "kavita", version = "0.9.1", cpu_cores = 0.5, memory_mb = 512, storage_gb = 10, exposure = "private", always_on = false, running = true, retention_keep = null, env_vars = null, domain = null }
+
+  # Dogfood pairings, pending the dogfood plan (domains, OIDC, money
+  # gates are decided there). Real domain names — they stay commented
+  # so an apply registers nothing until that plan lands: set forgejo's
+  # domain on the row above and uncomment umami (3.4.1-bundled is the
+  # catalog's packaging pick; 3.4.1 is the plain upstream). Umami's
+  # APP_SECRET is the owner's to supply or the app runs broken.
+  # forgejo … domain = "git.fluxvale.com"
+  # umami = { app = "umami", version = "3.4.1-bundled", cpu_cores = 0.5, memory_mb = 1024, storage_gb = 10, exposure = "public", always_on = true, running = true, retention_keep = null, env_vars = { APP_SECRET = "REPLACE_ME_APP_SECRET" }, domain = "analytics.fluxvale.com" }
+}

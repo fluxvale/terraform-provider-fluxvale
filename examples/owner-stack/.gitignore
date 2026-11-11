@@ -1,0 +1,8 @@
+# The pairing step fills these in — real values never belong in git
+# (terraform.tfvars carries credentials; state carries secrets).
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+*.tfstate
+*.tfstate.*
+*.tfplan
