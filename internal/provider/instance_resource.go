@@ -130,10 +130,14 @@ func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Sensitive:   true,
 				MarkdownDescription: "Environment variables for the deploy (merged over the app version's defaults, " +
 					"server-side). Updates in place: the provider diffs state against the plan into one merge PATCH; " +
-					"a null/omitted map clears the keys this resource previously managed. Write-only: the API never " +
-					"echoes env_vars, so plan can't see server-side drift by design, and the configured value is kept " +
-					"verbatim in state. Platform-owned keys are refused on set and skipped on remove, so an apply that " +
-					"stops naming one converges.",
+					"a null/omitted map clears the keys this resource previously managed, and a null element is " +
+					"rejected — remove the key instead (an empty string is a value). Write-only: the API never echoes " +
+					"env_vars, so plan can't see server-side drift by design, and the configured value is kept " +
+					"verbatim in state. Deployer-composed keys (OIDC recipe, backing URLs, instance URL) are refused " +
+					"on set and skipped on remove, so an apply that stops naming one converges. First-run contract " +
+					"`env` keys are fixed — set and remove both refuse with 400 — and `forbidden_env` keys refuse set " +
+					"but allow remove; a contract `env` key already in state dead-ends until removed from state/config " +
+					"by hand.",
 			},
 			"running": schema.BoolAttribute{
 				Optional:    true,
@@ -561,6 +565,9 @@ func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceMo
 	if plan.EnvVars.IsUnknown() {
 		diags.AddWarning(summary, fmt.Sprintf(
 			"instance %s: env_vars is unknown at apply time — skipped the in-place environment update; the keys this resource manages are left untouched.", id))
+		// The wrapper writes the plan back to state; an unknown map
+		// cannot ride state, so keep the prior state's map instead.
+		plan.EnvVars = state.EnvVars
 		return
 	}
 
@@ -571,6 +578,14 @@ func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceMo
 			if !ok || s.IsUnknown() {
 				diags.AddWarning(summary, fmt.Sprintf(
 					"instance %s: env_vars[%q] is unknown at apply time — skipped the in-place environment update; the keys this resource manages are left untouched.", id, key))
+				plan.EnvVars = state.EnvVars
+				return
+			}
+			if s.IsNull() {
+				diags.AddError(
+					"Invalid env_vars",
+					fmt.Sprintf("env_vars[%q] is null — remove the key instead; an empty string is a value", key),
+				)
 				return
 			}
 			want[key] = s.ValueString()
@@ -903,7 +918,17 @@ func envVarMap(ctx context.Context, v types.Map) (map[string]string, diag.Diagno
 	}
 	out := make(map[string]string, len(elems))
 	for k, val := range elems {
+		if val.IsNull() {
+			diags.AddError(
+				"Invalid env_vars",
+				fmt.Sprintf("env_vars[%q] is null — remove the key instead; an empty string is a value", k),
+			)
+			continue
+		}
 		out[k] = val.ValueString()
+	}
+	if diags.HasError() {
+		return nil, diags
 	}
 	return out, diag.Diagnostics{}
 }

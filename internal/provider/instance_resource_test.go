@@ -251,6 +251,32 @@ func TestCreateThenStop(t *testing.T) {
 	}
 }
 
+// A null map element is a config mistake, not "": the create fails
+// before the POST, naming the key.
+func TestCreateRejectsNullEnvValue(t *testing.T) {
+	f := newFakeAPI(t)
+	f.orgsDoc = `{"data": [{"id": "org-1", "type": "organization", "attributes": {"slug": "acme", "name": "Acme"}}]}`
+
+	pd := f.testClient()
+	data := testInstance(func(d *instanceModel) {
+		d.EnvVars = types.MapValueMust(types.StringType, map[string]attr.Value{
+			"KEY": types.StringNull(),
+		})
+	})
+	diags := &diag.Diagnostics{}
+	createInstance(context.Background(), pd, &data, diags)
+	assertError(t, diags,
+		`env_vars["KEY"] is null`,
+		"remove the key instead",
+		"an empty string is a value",
+	)
+	for _, r := range f.all() {
+		if r.method == http.MethodPost {
+			t.Errorf("unexpected POST %s after a null env element", r.path)
+		}
+	}
+}
+
 // always_on/exposure are not create inputs — the action's accept list
 // is name/cpu_cores/memory_mb/storage_gb/env_vars/app_version_id — so
 // a non-default posture rides its PATCH verb after the deploy PATCH.
@@ -412,6 +438,7 @@ func assertRequestList(t *testing.T, reqs []recordedRequest, want ...string) {
 	for i, r := range reqs {
 		got[i] = r.method + " " + r.path
 	}
+	want = append([]string{}, want...)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("recorded requests = %v, want exactly %v", got, want)
 	}
@@ -566,6 +593,50 @@ func TestUpdateEnvUnchangedSendsNoPatch(t *testing.T) {
 	assertRequestList(t, f.all(), "GET /api/v1/instances/inst-1")
 }
 
+// A null map element is an error naming the key — never send "" and
+// never fall back to a remove.
+func TestUpdateEnvNullElementIsAnError(t *testing.T) {
+	f := newFakeAPI(t)
+
+	state := envBase(t, map[string]string{"KEY": "value"})
+	plan := state
+	plan.EnvVars = types.MapValueMust(types.StringType, map[string]attr.Value{
+		"KEY": types.StringNull(),
+	})
+
+	diags := &diag.Diagnostics{}
+	if updateInstance(context.Background(), f.testClient(), &plan, &state, diags) {
+		t.Fatal("updateInstance reported the instance gone")
+	}
+	assertError(t, diags,
+		`env_vars["KEY"] is null`,
+		"remove the key instead",
+		"an empty string is a value",
+	)
+	assertRequestList(t, f.all()) // no merge PATCH, no read
+}
+
+// An empty string is a value, not a null/removal.
+func TestUpdateEnvEmptyStringIsAValue(t *testing.T) {
+	f := newFakeAPI(t)
+	f.instanceGets = []scriptedResponse{script(200, runningDoc)}
+
+	state := envBase(t, map[string]string{"KEY": "old"})
+	plan := state
+	plan.EnvVars = envVarInput(t, map[string]string{"KEY": ""})
+
+	diags := &diag.Diagnostics{}
+	updateInstance(context.Background(), f.testClient(), &plan, &state, diags)
+	assertNoErrors(t, diags)
+
+	reqs := f.all()
+	assertRequestList(t, reqs,
+		"PATCH /api/v1/instances/inst-1/env",
+		"GET /api/v1/instances/inst-1",
+	)
+	assertEnvMerge(t, reqs[0], map[string]string{"KEY": ""}, nil)
+}
+
 // No status gate: an error/pending/lost row still gets the merge PATCH
 // — the server owns the status matrix (row-only there, live Secret on
 // running/starting, refusals on deploying/restoring/deleting).
@@ -693,6 +764,63 @@ func TestUpdateWrapperEnvKeepsConfiguredMap(t *testing.T) {
 		if req.method == http.MethodPost || req.method == http.MethodDelete {
 			t.Errorf("unexpected %s %s on an env-only update", req.method, req.path)
 		}
+	}
+}
+
+// An unknown plan that reaches Update must still write a state-safe
+// map: warning, plan.EnvVars falls back to the prior state (never
+// unknown — State.Set would fail), and no merge PATCH is sent.
+func TestUpdateWrapperEnvUnknownKeepsPriorState(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name string
+		env  types.Map
+	}{
+		{"whole map unknown", types.MapUnknown(types.StringType)},
+		{"element unknown", types.MapValueMust(types.StringType, map[string]attr.Value{
+			"MAYBE": types.StringUnknown(),
+		})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, sch := newSchemadResource(ctx, t)
+
+			f := newFakeAPI(t)
+			f.instanceGets = []scriptedResponse{script(200, runningDoc)}
+			r.pd = f.testClient()
+
+			stateData := envBase(t, map[string]string{"API_KEY": "keep"})
+			planData := stateData
+			planData.EnvVars = tc.env
+
+			req := resource.UpdateRequest{
+				Plan:  tfsdk.Plan{Schema: sch, Raw: modelToRaw(ctx, t, sch, &planData)},
+				State: tfsdk.State{Schema: sch, Raw: modelToRaw(ctx, t, sch, &stateData)},
+			}
+			resp := &resource.UpdateResponse{
+				State: tfsdk.State{Schema: sch, Raw: modelToRaw(ctx, t, sch, &stateData)},
+			}
+			r.Update(ctx, req, resp)
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("Update: %v", resp.Diagnostics)
+			}
+			if len(resp.Diagnostics.Warnings()) == 0 {
+				t.Fatal("unknown env_vars: no warning diagnostic")
+			}
+
+			got := rawToModel(ctx, t, sch, resp.State.Raw)
+			if env := envMapOf(t, got.EnvVars); !reflect.DeepEqual(env, map[string]string{"API_KEY": "keep"}) {
+				t.Errorf("state env_vars = %v, want the prior managed map", env)
+			}
+			if got.ID.ValueString() != "inst-1" {
+				t.Errorf("state id = %q, want inst-1", got.ID.ValueString())
+			}
+			for _, req := range f.all() {
+				if req.method == http.MethodPatch {
+					t.Errorf("unexpected %s %s on an unknown env plan", req.method, req.path)
+				}
+			}
+		})
 	}
 }
 

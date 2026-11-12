@@ -241,14 +241,33 @@ func TestInstanceSchemaContract(t *testing.T) {
 		"name": func() bool {
 			return len(sch.Attributes["name"].(schema.StringAttribute).PlanModifiers) > 0
 		},
-		"app_version_id": func() bool {
-			return len(sch.Attributes["app_version_id"].(schema.StringAttribute).PlanModifiers) > 0
-		},
 	}
 	for name, hasPlanModifiers := range replaceable {
 		if !hasPlanModifiers() {
 			t.Errorf("%s has no plan modifiers (want RequiresReplace — create-only on the wire)", name)
 		}
+	}
+
+	// app_version_id is create-only AND stable across in-place updates:
+	// RequiresReplace must be present (a version change replaces) and so
+	// must UseStateForUnknown (an env-only change must not go unknown
+	// and replace a slug-configured instance). Assert the public
+	// descriptions, not just "has some modifier".
+	var appVersionStable, appVersionReplaces bool
+	for _, m := range sch.Attributes["app_version_id"].(schema.StringAttribute).PlanModifiers {
+		desc := m.Description(ctx)
+		if strings.Contains(desc, "state will not change") {
+			appVersionStable = true
+		}
+		if strings.Contains(desc, "destroy and recreate") {
+			appVersionReplaces = true
+		}
+	}
+	if !appVersionStable {
+		t.Error("app_version_id must use UseStateForUnknown — an in-place update must not replace a slug-configured instance")
+	}
+	if !appVersionReplaces {
+		t.Error("app_version_id must use RequiresReplace — a version change is create-only")
 	}
 
 	// env_vars updates in place (#731, ADR-0052): no plan modifiers and
@@ -297,7 +316,13 @@ func TestInstanceSchemaContract(t *testing.T) {
 	// id keeps its prior state across in-place updates (the plan
 	// modifier that stops dependent resources planning off an unknown
 	// id).
-	if len(sch.Attributes["id"].(schema.StringAttribute).PlanModifiers) == 0 {
+	var idStable bool
+	for _, m := range sch.Attributes["id"].(schema.StringAttribute).PlanModifiers {
+		if strings.Contains(m.Description(ctx), "state will not change") {
+			idStable = true
+		}
+	}
+	if !idStable {
 		t.Error("id must use UseStateForUnknown — in-place updates must keep the id known")
 	}
 

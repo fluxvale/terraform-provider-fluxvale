@@ -489,7 +489,9 @@ type smokeFake struct {
 
 	// deleted marks ids whose DELETE has been served: their GETs 404
 	// immediately, so the teardown's wait-gone poll does not consume
-	// the scripted running entries the pre-destroy refreshes need.
+	// the scripted running entries the env-step refreshes need. The
+	// running-until-404 retry itself is covered by
+	// TestDeleteWrapperEndToEnd.
 	deleted map[string]bool
 
 	// instance creates, by config name — the fake's row-id contract
