@@ -10,6 +10,7 @@ import (
 	"github.com/fluxvale/terraform-provider-fluxvale/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -146,8 +147,11 @@ func (d *instanceDataSource) Read(ctx context.Context, req datasource.ReadReques
 		return
 	}
 
-	id, hasID := nonEmptyValue(data.ID)
-	slug, hasSlug := nonEmptyValue(data.Slug)
+	id, hasID := lookupValue("id", data.ID, &resp.Diagnostics)
+	slug, hasSlug := lookupValue("slug", data.Slug, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	if hasID == hasSlug {
 		if hasID {
 			resp.Diagnostics.AddError(
@@ -174,14 +178,24 @@ func (d *instanceDataSource) Read(ctx context.Context, req datasource.ReadReques
 		lookup = fmt.Sprintf("id %q", id)
 		in, err = d.pd.client.GetInstance(ctx, id)
 	} else {
-		orgSpec, hasOrg := nonEmptyValue(data.Organization)
-		providerOrg, hasProviderOrg := nonEmptyValue(d.pd.organization)
+		orgSpec, hasOrg := lookupValue("organization", data.Organization, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		providerOrg, hasProviderOrg := "", false
+		if !hasOrg {
+			providerOrg, hasProviderOrg = lookupValue("provider organization", d.pd.organization, &resp.Diagnostics)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+		}
 		orgID := ""
 		// Resolve the org only when the caller gave a non-empty one
 		// (attribute or provider default). With neither, the lookup runs
 		// unfiltered: the server answers from the token's memberships
 		// and names the remedy if the slug still matches more than one
-		// row. Empty strings are unset, exactly like null.
+		// row. Whitespace-only is unset; padded non-empty values are
+		// rejected by lookupValue — never rewritten.
 		if hasOrg || hasProviderOrg {
 			orgID = resolveOrgID(ctx, d.pd.client, optionalString(orgSpec), optionalString(providerOrg), &resp.Diagnostics)
 			if resp.Diagnostics.HasError() {
@@ -206,7 +220,7 @@ func (d *instanceDataSource) Read(ctx context.Context, req datasource.ReadReques
 					fmt.Sprintf("No instance with %s is visible to this token.", lookup),
 				)
 				return
-			case apiErr.Status == http.StatusBadRequest && apiErrorHasCode(apiErr, "multiple_results"):
+			case hasSlug && apiErr.Status == http.StatusBadRequest && apiErrorHasCode(apiErr, "multiple_results"):
 				resp.Diagnostics.AddError(
 					"Ambiguous instance slug",
 					fmt.Sprintf("More than one visible instance matches %s. Set \"organization\" to narrow the lookup, or use \"id\" instead. Server: %v",
@@ -243,21 +257,32 @@ func mapInstanceDataSource(data *instanceDataSourceModel, in client.Instance) {
 	data.AppVersionID = types.StringPointerValue(stringPointer(in.AppVersionID))
 }
 
-// nonEmptyValue returns a configured string's trimmed value and
-// whether it is set, known, and non-empty. Empty strings (and
-// whitespace-only strings) are unset: `id = ""` must not request the
-// collection and `organization = ""` must not go through org
-// resolution.
-func nonEmptyValue(v types.String) (string, bool) {
+// lookupValue returns a configured lookup key and whether it is set.
+// Whitespace-only is unset, but a non-empty value with leading or
+// trailing whitespace is rejected: an opaque id/slug/org key is never
+// rewritten, and sending the padded value would produce a misleading
+// 404.
+func lookupValue(attribute string, v types.String, diags *diag.Diagnostics) (string, bool) {
 	if v.IsNull() || v.IsUnknown() {
 		return "", false
 	}
-	s := strings.TrimSpace(v.ValueString())
-	return s, s != ""
+	raw := v.ValueString()
+	if strings.TrimSpace(raw) == "" {
+		return "", false
+	}
+	if strings.TrimSpace(raw) != raw {
+		diags.AddError(
+			"Invalid "+attribute,
+			fmt.Sprintf("The %q value %q has leading or trailing whitespace — lookup keys are used verbatim and must not be padded.",
+				attribute, raw),
+		)
+		return "", false
+	}
+	return raw, true
 }
 
-// optionalString maps an already-trimmed value back to a types.String
-// for resolveOrgID — empty is null.
+// optionalString maps an already-validated value back to a
+// types.String for resolveOrgID — empty is null.
 func optionalString(s string) types.String {
 	if s == "" {
 		return types.StringNull()

@@ -438,6 +438,102 @@ func TestInstanceDataSourceEmptyOrganizationIsUnset(t *testing.T) {
 	})
 }
 
+func TestInstanceDataSourceLookupValueWhitespace(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+
+	newDS := func(t *testing.T, providerOrg types.String) (*instanceDataSource, *fakeAPI) {
+		t.Helper()
+		f := newFakeAPI(t)
+		f.instanceBySlugDoc = runningDoc
+		f.orgsDoc = orgsDoc
+		pd := f.testClient()
+		if !providerOrg.IsNull() {
+			pd.organization = providerOrg
+		}
+		d := NewInstanceDataSource().(*instanceDataSource)
+		cfgResp := &datasource.ConfigureResponse{}
+		d.Configure(ctx, datasource.ConfigureRequest{ProviderData: pd}, cfgResp)
+		assertNoErrors(t, &cfgResp.Diagnostics)
+		return d, f
+	}
+
+	t.Run("whitespace-only id is unset", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"id": "   "})
+		assertError(t, &resp.Diagnostics, "exactly one", "id", "slug")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — whitespace-only is unset", reqs)
+		}
+	})
+
+	t.Run("whitespace-only slug is unset", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "   "})
+		assertError(t, &resp.Diagnostics, "exactly one", "id", "slug")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — whitespace-only is unset", reqs)
+		}
+	})
+
+	t.Run("whitespace-only organization is unset", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{
+			"slug":         "velvety-otter-1234",
+			"organization": "   ",
+		})
+		assertNoErrors(t, &resp.Diagnostics)
+		req := findOne(t, f.all(), "GET", "/api/v1/instances/by-slug/velvety-otter-1234")
+		if _, ok := req.query["organization_id"]; ok {
+			t.Error("organization_id sent for a whitespace-only organization")
+		}
+		for _, r := range f.all() {
+			if strings.HasSuffix(r.path, "/organizations") {
+				t.Errorf("GET %s — whitespace-only must not trigger org resolution", r.path)
+			}
+		}
+	})
+
+	t.Run("padded id is rejected without a request", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"id": " inst-1 "})
+		assertError(t, &resp.Diagnostics, "Invalid id", "padded", "leading or trailing whitespace")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — the padded value must not reach the API", reqs)
+		}
+	})
+
+	t.Run("padded slug is rejected without a request", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": " velvety-otter-1234 "})
+		assertError(t, &resp.Diagnostics, "Invalid slug", "padded", "leading or trailing whitespace")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — the padded value must not reach the API", reqs)
+		}
+	})
+
+	t.Run("padded organization is rejected without a request", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{
+			"slug":         "velvety-otter-1234",
+			"organization": " acme ",
+		})
+		assertError(t, &resp.Diagnostics, "Invalid organization", "padded", "leading or trailing whitespace")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — the padded value must not reach the API", reqs)
+		}
+	})
+
+	t.Run("padded provider organization is rejected without a request", func(t *testing.T) {
+		d, f := newDS(t, types.StringValue(" acme "))
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "velvety-otter-1234"})
+		assertError(t, &resp.Diagnostics, "Invalid provider organization", "padded", "leading or trailing whitespace")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — the padded value must not reach the API", reqs)
+		}
+	})
+}
+
 func TestInstanceDataSourceExactlyOneLookup(t *testing.T) {
 	ctx := context.Background()
 	sch := instanceSchema(ctx, t)
@@ -536,6 +632,63 @@ func TestInstanceDataSourceAmbiguousSlug(t *testing.T) {
 	resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "dup-slug"})
 	assertError(t, &resp.Diagnostics, "Ambiguous instance slug", "dup-slug", "organization", "id",
 		"more than one record matches this query")
+}
+
+func TestInstanceDataSource400Fallbacks(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+
+	cases := []struct {
+		name string
+		byID bool
+		doc  string
+	}{
+		{
+			name: "another 400 code on a slug lookup",
+			doc:  `{"errors": [{"status": "400", "code": "invalid_argument", "title": "InvalidArgument", "detail": "bad input"}]}`,
+		},
+		{
+			name: "empty errors array",
+			doc:  `{"errors": []}`,
+		},
+		{
+			name: "no parseable errors body",
+			doc:  ``,
+		},
+		{
+			name: "multiple_results on an id lookup is not the slug remedy",
+			byID: true,
+			doc:  `{"errors": [{"status": "400", "code": "multiple_results", "title": "Multiple results", "detail": "more than one record matches"}]}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeAPI(t)
+			if tc.byID {
+				f.instanceGets = []scriptedResponse{script(http.StatusBadRequest, tc.doc)}
+			} else {
+				f.instanceBySlugStatus = http.StatusBadRequest
+				f.instanceBySlugDoc = tc.doc
+			}
+
+			d := NewInstanceDataSource().(*instanceDataSource)
+			cfgResp := &datasource.ConfigureResponse{}
+			d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+			assertNoErrors(t, &cfgResp.Diagnostics)
+
+			cfg := map[string]string{"slug": "velvety-otter-1234"}
+			if tc.byID {
+				cfg = map[string]string{"id": "inst-1"}
+			}
+			resp := readInstanceDataSource(t, d, sch, cfg)
+			assertError(t, &resp.Diagnostics, "Unable to read the Instance")
+			for _, d := range resp.Diagnostics.Errors() {
+				if strings.Contains(d.Summary(), "Ambiguous instance slug") {
+					t.Errorf("summary = %q — only the slug multiple_results answer is the ambiguity remedy", d.Summary())
+				}
+			}
+		})
+	}
 }
 
 func TestInstanceDataSourceForbiddenSurfacesVerbatim(t *testing.T) {

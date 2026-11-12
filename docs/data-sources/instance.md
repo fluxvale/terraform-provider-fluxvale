@@ -59,7 +59,9 @@ Computed:
 
 **Exactly one lookup form.** Setting both `id` and `slug`, or neither,
 is an error at read time — the provider refuses before calling the API.
-Empty (or whitespace-only) strings count as unset.
+Empty or whitespace-only strings count as unset; a non-empty value with
+leading or trailing whitespace is rejected (lookup keys are used
+verbatim, never trimmed), for `id`, `slug`, and `organization` alike.
 
 **Ambiguous slugs.** A slug is unique only per cluster
 (`[:slug, :cluster_id]`), not globally. A slug that still matches more

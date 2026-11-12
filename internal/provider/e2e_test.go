@@ -546,6 +546,8 @@ func zipBinary(t *testing.T, bin, zipPath, innerName string) {
 type smokeFake struct {
 	*httptest.Server
 
+	t *testing.T
+
 	mu   sync.Mutex
 	reqs []smokeReq
 
@@ -614,6 +616,7 @@ func countContains(method, path string, n int) smokeCount {
 
 func newSmokeFake(t *testing.T) *smokeFake {
 	f := &smokeFake{
+		t: t,
 		gets: map[string][]func() smokeResp{
 			// The org-gateway script: create lands :provisioning; the
 			// attach waits the observer's promotion to :active, then the
@@ -726,9 +729,20 @@ func newSmokeFake(t *testing.T) *smokeFake {
 				return
 			}
 			// The backup row keeps its scripted read; instance detail
-			// repeats until the delete marker.
+			// repeats until the delete marker, but only for a real row
+			// and the bare detail action.
 			if action == "backup-setting" {
 				f.scripted(w, rest)
+				return
+			}
+			if action != "" {
+				f.t.Errorf("GET %s: unexpected instance action %q — only the bare detail and backup-setting are served", r.URL.Path, action)
+				f.json(w, http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`)
+				return
+			}
+			if !f.instanceExists(id) {
+				f.t.Errorf("GET %s: unknown instance id %q — the fake only serves created rows", r.URL.Path, id)
+				f.json(w, http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`)
 				return
 			}
 			f.json(w, http.StatusOK, f.instanceDoc(id, "running"))
@@ -866,6 +880,15 @@ func (f *smokeFake) isDeleted(id string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.deleted[id]
+}
+
+// instanceExists reports whether a create seeded this row id — the
+// detail GET's fidelity guard.
+func (f *smokeFake) instanceExists(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.posture[id]
+	return ok
 }
 
 // instanceBySlugID maps the fake's generated slug back to its row id —
