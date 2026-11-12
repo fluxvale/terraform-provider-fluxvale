@@ -373,6 +373,88 @@ func TestResizeInstanceBodyShape(t *testing.T) {
 	}
 }
 
+// The in-place env merge (#731, ADR-0052): PATCH /instances/:id/env
+// carries the caller's set/remove diff inside data.attributes, and the
+// response is the standard instance detail document.
+func TestUpdateInstanceEnvBodyShape(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	var gotBody map[string]any
+	srv := handlerServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		fmt.Fprint(w, instanceDocument("inst-1", "running"))
+	})
+
+	c := New(srv.URL, "fvpat_test", "test", srv.Client())
+	instance, err := c.UpdateInstanceEnv(context.Background(), "inst-1",
+		map[string]string{"ADDED": "yes", "CHANGED": "new"}, []string{"DROP"})
+	if err != nil {
+		t.Fatalf("UpdateInstanceEnv: %v", err)
+	}
+
+	if gotMethod != http.MethodPatch || gotPath != "/api/v1/instances/inst-1/env" {
+		t.Errorf("request = %s %s, want PATCH /api/v1/instances/inst-1/env", gotMethod, gotPath)
+	}
+	if gotAuth != "Bearer fvpat_test" {
+		t.Errorf("Authorization = %q, want the bearer token", gotAuth)
+	}
+
+	data, _ := gotBody["data"].(map[string]any)
+	if data == nil || data["type"] != "instance" || data["id"] != "inst-1" {
+		t.Fatalf("data = %+v, want type instance + id inst-1", gotBody["data"])
+	}
+	attrs, _ := data["attributes"].(map[string]any)
+	set, _ := attrs["set"].(map[string]any)
+	if len(set) != 2 || set["ADDED"] != "yes" || set["CHANGED"] != "new" {
+		t.Errorf("attributes.set = %+v, want exactly ADDED/CHANGED", set)
+	}
+	remove, _ := attrs["remove"].([]any)
+	if len(remove) != 1 || remove[0] != "DROP" {
+		t.Errorf("attributes.remove = %+v, want exactly [DROP]", remove)
+	}
+	if _, ok := attrs["env_vars"]; ok {
+		t.Error("attributes.env_vars sent — the merge verb's body is set/remove only")
+	}
+
+	if instance.ID != "inst-1" || instance.Status != "running" {
+		t.Errorf("instance = %+v, want inst-1 running", instance)
+	}
+	if instance.Namespace == nil || *instance.Namespace != "fluxvale-app-inst-1" {
+		t.Errorf("Namespace = %v, want the detail document's namespace", instance.Namespace)
+	}
+	if instance.CPUCores == nil || *instance.CPUCores != 0.5 {
+		t.Errorf("CPUCores = %v, want 0.5 parsed from the detail document", instance.CPUCores)
+	}
+}
+
+// Empty collections must marshal as {} / [] — the wire envelope always
+// carries both keys, never nulls.
+func TestUpdateInstanceEnvEmptyCollections(t *testing.T) {
+	var gotBody map[string]any
+	srv := handlerServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		fmt.Fprint(w, instanceDocument("inst-1", "running"))
+	})
+
+	c := New(srv.URL, "fvpat_test", "test", srv.Client())
+	if _, err := c.UpdateInstanceEnv(context.Background(), "inst-1", nil, nil); err != nil {
+		t.Fatalf("UpdateInstanceEnv: %v", err)
+	}
+
+	attrs := gotBody["data"].(map[string]any)["attributes"].(map[string]any)
+	if set, ok := attrs["set"].(map[string]any); !ok || len(set) != 0 {
+		t.Errorf("attributes.set = %#v, want an empty object", attrs["set"])
+	}
+	if remove, ok := attrs["remove"].([]any); !ok || len(remove) != 0 {
+		t.Errorf("attributes.remove = %#v, want an empty array", attrs["remove"])
+	}
+}
+
 // A wrong-typed detail field is shape drift, not a silent zero.
 func TestInstanceShapeDriftIsAnError(t *testing.T) {
 	doc := `{"data": {"id": "inst-1", "type": "instance", "attributes": {

@@ -43,6 +43,10 @@ type fakeAPI struct {
 	// PATCH-failure arm.
 	failPatch       string
 	failPatchStatus int
+	// failEnvPatchStatus: non-zero answers PATCH /instances/:id/env
+	// with this status and an errors body — the merge verb's refusal
+	// arm (the server's 400 copy must surface verbatim).
+	failEnvPatchStatus int
 
 	// backups + gateway slices
 	backupGets         []scriptedResponse // GET /instances/:id/backup-setting
@@ -156,6 +160,22 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		default:
 			f.json(w, http.StatusMethodNotAllowed, `{"errors": [{"title": "Method Not Allowed"}]}`)
 		}
+	})
+
+	// The in-place env merge (#731): the specific method+pattern wins
+	// over the /instances/ subtree above. Recorded with its set/remove
+	// body; answers the standard instance detail document. The
+	// non-zero status is the server-refusal arm (the 400 copy must
+	// surface verbatim).
+	mux.HandleFunc("PATCH /api/v1/instances/{id}/env", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.record(r, body)
+		if f.failEnvPatchStatus != 0 {
+			f.json(w, f.failEnvPatchStatus, `{"errors": [{"title": "InvalidArgument", "detail": "ROOT_URL is composed by the deployer and cannot be set"}]}`)
+			return
+		}
+		f.json(w, http.StatusOK, runningDoc)
 	})
 
 	// Backups: the routed settings family. The instance-scoped patterns

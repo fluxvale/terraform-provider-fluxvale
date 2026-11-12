@@ -214,6 +214,42 @@ func (c *Client) InstanceAction(ctx context.Context, id, action string, attrs ma
 	return instance, nil
 }
 
+// UpdateInstanceEnv PATCHes /api/v1/instances/:id/env — the in-place
+// env merge (#731, ADR-0052). The diff is the caller's: set carries
+// the keys to add or overwrite, remove the keys to drop. The server
+// owns the key rules — a platform-owned or first-run-contract key in
+// set is refused (400, naming the keys), and an owned remove is
+// skipped so an apply that stopped naming the key still converges.
+// The response is the standard instance detail document; env is never
+// echoed.
+func (c *Client) UpdateInstanceEnv(ctx context.Context, id string, set map[string]string, remove []string) (Instance, error) {
+	if set == nil {
+		set = map[string]string{}
+	}
+	if remove == nil {
+		remove = []string{}
+	}
+	path := "/api/v1/instances/" + id + "/env"
+	doc, err := c.Do(ctx, http.MethodPatch, path, map[string]any{
+		"data": map[string]any{
+			"type": "instance",
+			"id":   id,
+			"attributes": map[string]any{
+				"set":    set,
+				"remove": remove,
+			},
+		},
+	})
+	if err != nil {
+		return Instance{}, err
+	}
+	instance, err := instanceFromResource(doc.Data)
+	if err != nil {
+		return Instance{}, shapeDrift("PATCH "+path, doc.Data.ID, err)
+	}
+	return instance, nil
+}
+
 // ResizeInstance PATCHes the stopped-first resize (#493, ADR-0043):
 // CPU/RAM both ways, storage up-only (a shrink is the server's 400
 // naming both figures). All three dims ride explicitly — absent ones
