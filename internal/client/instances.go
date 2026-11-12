@@ -46,6 +46,9 @@ const detailFields = "name,slug,namespace,status,exposure,always_on,image,port,"
 	"deployed_at,organization_id,app_version_id"
 
 func instanceFromResource(row Resource) (Instance, error) {
+	if row.ID == "" {
+		return Instance{}, fmt.Errorf("data.id is missing or empty")
+	}
 	name, err := attrString(row.Attributes, "name")
 	if err != nil {
 		return Instance{}, err
@@ -69,9 +72,9 @@ func instanceFromResource(row Resource) (Instance, error) {
 	if alwaysOn == nil {
 		return Instance{}, fmt.Errorf("always_on is missing or null")
 	}
-	// The deploy-derived fields are null on a pending row — absent, not
-	// drift. The FK ids are absent from the create/PATCH responses'
-	// route-default field set; only GetInstance asks for them.
+	// namespace/deployed_at are null on a pending row — absent, not
+	// drift. image/port are set at create (derived from the app
+	// version), so they normally ride every response.
 	namespace, err := attrOptString(row.Attributes, "namespace")
 	if err != nil {
 		return Instance{}, err
@@ -100,8 +103,17 @@ func instanceFromResource(row Resource) (Instance, error) {
 	if err != nil {
 		return Instance{}, err
 	}
-	orgID, _ := attrOptString(row.Attributes, "organization_id")
-	versionID, _ := attrOptString(row.Attributes, "app_version_id")
+	// The FK ids are absent from the create/PATCH responses' route-default
+	// field set (only GetInstance/GetInstanceBySlug ask for them); absent
+	// stays nil. A PRESENT but wrong-typed value is shape drift.
+	orgID, err := attrOptString(row.Attributes, "organization_id")
+	if err != nil {
+		return Instance{}, err
+	}
+	versionID, err := attrOptString(row.Attributes, "app_version_id")
+	if err != nil {
+		return Instance{}, err
+	}
 	return Instance{
 		ID:             row.ID,
 		Name:           name,

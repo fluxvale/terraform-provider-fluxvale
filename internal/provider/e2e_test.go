@@ -549,10 +549,10 @@ type smokeFake struct {
 	mu   sync.Mutex
 	reqs []smokeReq
 
-	// per-script GET queues — instance ids (seeded per create) and the
-	// org-gateway singleton; the last entry repeats, the poll loops'
-	// steady state. Entries are LAZY: rendered at serve time, so the
-	// instance docs echo the posture the PATCH verbs applied.
+	// per-script GET queues for the non-instance-detail routes (the
+	// org-gateway singleton and the backup row); the last entry
+	// repeats, the poll loops' steady state. Entries are LAZY:
+	// rendered at serve time.
 	gets map[string][]func() smokeResp
 
 	// per-instance row state the PATCH verbs mutate, echoed on reads —
@@ -561,8 +561,8 @@ type smokeFake struct {
 	posture map[string]*smokePosture
 
 	// deleted marks ids whose DELETE has been served: their GETs 404
-	// immediately, so the teardown's wait-gone poll does not consume
-	// the scripted running entries the env-step refreshes need. The
+	// immediately, so the teardown's wait-gone poll stops at the
+	// marker. Instance detail GETs repeat until this flips; the
 	// running-until-404 retry itself is covered by
 	// TestDeleteWrapperEndToEnd.
 	deleted map[string]bool
@@ -628,10 +628,11 @@ func newSmokeFake(t *testing.T) *smokeFake {
 				func() smokeResp { return r200(smokeBackupDoc()) },
 			},
 		},
-		// Instance GET scripts are seeded per create (see the POST
-		// handler): the apply, the env steps' refreshes and reads, and
-		// destroy's refresh. A DELETE marks the id so the wait-gone poll
-		// 404s immediately instead of eating scripted running entries.
+		// Instance detail GETs repeat the running doc until a DELETE
+		// marks the id (see the instance handler): the apply, the env
+		// steps' refreshes and reads, the data sources' re-reads, and
+		// destroy's refresh all get a steady state, and the wait-gone
+		// poll stops at the marker.
 		posture:   map[string]*smokePosture{},
 		deleted:   map[string]bool{},
 		createIDs: map[string]string{},
@@ -667,10 +668,10 @@ func newSmokeFake(t *testing.T) *smokeFake {
 	// Instance create: the response ECHOES the request — the real API
 	// returns the row it created, and tofu plans independent instances
 	// concurrently, so a response queue would pop in race order (the
-	// first run of this gate caught exactly that swap). The GET script
-	// is seeded as LAZY docs — rendered at serve time so reads echo the
-	// posture the PATCH verbs actually applied (a doc baked now would
-	// contradict the apply's consistency check).
+	// first run of this gate caught exactly that swap). Instance GETs
+	// are rendered lazily at serve time, so reads echo the posture the
+	// PATCH verbs actually applied (a doc baked now would contradict
+	// the apply's consistency check).
 	mux.HandleFunc("POST /api/v1/instances", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
@@ -678,29 +679,20 @@ func newSmokeFake(t *testing.T) *smokeFake {
 		attrs, _ := body["data"].(map[string]any)["attributes"].(map[string]any)
 		id := f.instanceID(t, fmt.Sprint(attrs["name"]))
 		f.mu.Lock()
-		// Enough running entries for the initial apply (wait + final
-		// read + the by-id data source's read), the two env steps' plan
-		// refreshes + post-update reads, the data source re-reads on
-		// each plan, and destroy's refresh. The post-DELETE GET 404s via
-		// the deleted marker, not this script.
-		script := make([]func() smokeResp, 0, 15)
-		for range 14 {
-			script = append(script, func() smokeResp { return r200(f.instanceDoc(id, "running")) })
-		}
-		script = append(script, func() smokeResp { return smokeResp{http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`} })
-		f.gets[id] = script
 		f.posture[id] = &smokePosture{exposure: "public", alwaysOn: false}
 		f.mu.Unlock()
 		f.json(w, http.StatusCreated, f.createDoc(id, attrs))
 	})
 
-	// Instance detail: per-id script for GETs; the posture verbs
-	// MUTATE the fake's row state (exposure/always-on) — reads echo
-	// what was applied. The verb paths are /instances/{id}/{action} —
-	// strip the ACTION or the row key is wrong (the hardened fake's
-	// body assertions caught exactly that). The posture/deploy/stop
-	// PATCH verbs answer a full parseable doc (the create path
-	// discards it, the client still parses).
+	// Instance detail: GETs repeat the running doc until the DELETE
+	// marker is set — no hand-counted script to exhaust on a new read
+	// or plan. The posture verbs MUTATE the fake's row state
+	// (exposure/always-on) — reads echo what was applied. The verb
+	// paths are /instances/{id}/{action} — strip the ACTION or the row
+	// key is wrong (the hardened fake's body assertions caught exactly
+	// that). The posture/deploy/stop PATCH verbs answer a full
+	// parseable doc (the create path discards it, the client still
+	// parses).
 	// The by-slug lookup (#731 T2) is more specific than the subtree
 	// pattern below, so it wins: the data source's slug form reads the
 	// created row by its generated slug.
@@ -733,7 +725,13 @@ func newSmokeFake(t *testing.T) *smokeFake {
 				f.json(w, http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`)
 				return
 			}
-			f.scripted(w, rest)
+			// The backup row keeps its scripted read; instance detail
+			// repeats until the delete marker.
+			if action == "backup-setting" {
+				f.scripted(w, rest)
+				return
+			}
+			f.json(w, http.StatusOK, f.instanceDoc(id, "running"))
 		case http.MethodDelete:
 			f.markDeleted(id)
 			f.json(w, http.StatusOK, f.instanceDoc(id, "pending"))
@@ -887,7 +885,7 @@ func (f *smokeFake) instanceBySlugID(slug string) string {
 }
 
 // instanceID maps a create body's name to the fake's row id — stable
-// per instance, so the per-id GET scripts match.
+// per instance, so the per-id detail reads match.
 func (f *smokeFake) instanceID(t *testing.T, name string) string {
 	t.Helper()
 	ids := map[string]string{

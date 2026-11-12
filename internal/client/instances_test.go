@@ -279,6 +279,69 @@ func TestGetInstanceBySlugPathQueryAndParse(t *testing.T) {
 	}
 }
 
+// The slug reaches the URL-escaped path segment — a slug with a slash
+// or space cannot retarget the request.
+func TestGetInstanceBySlugEscapesTheSlug(t *testing.T) {
+	var gotPath string
+	srv := handlerServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		fmt.Fprint(w, instanceDocument("inst-1", "running"))
+	})
+
+	c := New(srv.URL, "fvpat_test", "test", srv.Client())
+	if _, err := c.GetInstanceBySlug(context.Background(), "a/b c", ""); err != nil {
+		t.Fatalf("GetInstanceBySlug: %v", err)
+	}
+
+	want := "/api/v1/instances/by-slug/a%2Fb%20c"
+	if gotPath != want {
+		t.Errorf("escaped path = %q, want %q", gotPath, want)
+	}
+}
+
+// A response with attributes but no data.id is shape drift — the data
+// source must not report a successful lookup with an id it never got.
+func TestGetInstanceBySlugEmptyIDIsShapeDrift(t *testing.T) {
+	doc := `{"data": {"type": "instance", "attributes": {
+		"name": "Blog", "slug": "velvety-otter-1234", "status": "running",
+		"exposure": "public", "always_on": false
+	}}}`
+	srv := testServer(t, http.StatusOK, doc)
+	c := New(srv.URL, "fvpat_test", "test", srv.Client())
+
+	_, err := c.GetInstanceBySlug(context.Background(), "velvety-otter-1234", "")
+	if err == nil || !strings.Contains(err.Error(), "data.id") {
+		t.Fatalf("err = %v, want the empty-id shape-drift error", err)
+	}
+}
+
+// A present-but-wrong-typed FK is shape drift, not a silent null. The
+// create/PATCH responses omit the pair and keep parsing as absent.
+func TestInstanceWrongTypedFKIDsAreShapeDrift(t *testing.T) {
+	cases := []struct {
+		field string
+		raw   string
+	}{
+		{field: "organization_id", raw: "7"},
+		{field: "app_version_id", raw: `["ver-1"]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			doc := fmt.Sprintf(`{"data": {"id": "inst-1", "type": "instance", "attributes": {
+				"name": "Blog", "slug": "velvety-otter-1234", "status": "running",
+				"exposure": "public", "always_on": false, %q: %s
+			}}}`, tc.field, tc.raw)
+			srv := testServer(t, http.StatusOK, doc)
+			c := New(srv.URL, "fvpat_test", "test", srv.Client())
+
+			_, err := c.GetInstance(context.Background(), "inst-1")
+			if err == nil || !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("err = %v, want a shape-drift error naming %s", err, tc.field)
+			}
+		})
+	}
+}
+
 // The lifecycle PATCH verbs carry the resource id plus an attributes
 // object — the exact shape the route tests send (empty attributes for
 // the no-input verbs).

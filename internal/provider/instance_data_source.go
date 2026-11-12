@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/fluxvale/terraform-provider-fluxvale/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -93,11 +94,11 @@ func (d *instanceDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 			},
 			"image": schema.StringAttribute{
 				Computed:    true,
-				Description: "The deployed image (null before the first deploy).",
+				Description: "The app version's image, set at create (not deploy-derived).",
 			},
 			"port": schema.Int64Attribute{
 				Computed:    true,
-				Description: "The deployed app's port (null before the first deploy).",
+				Description: "The app version's port, set at create (not deploy-derived).",
 			},
 			"deployed_at": schema.StringAttribute{
 				Computed:    true,
@@ -109,7 +110,7 @@ func (d *instanceDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 			},
 			"app_version_id": schema.StringAttribute{
 				Computed:    true,
-				Description: "The deployed app version's id (requested via the sparse fieldset).",
+				Description: "The instance's app version id, set at create (requested via the sparse fieldset).",
 			},
 		},
 	}
@@ -145,8 +146,8 @@ func (d *instanceDataSource) Read(ctx context.Context, req datasource.ReadReques
 		return
 	}
 
-	hasID := !data.ID.IsNull() && !data.ID.IsUnknown()
-	hasSlug := !data.Slug.IsNull() && !data.Slug.IsUnknown()
+	id, hasID := nonEmptyValue(data.ID)
+	slug, hasSlug := nonEmptyValue(data.Slug)
 	if hasID == hasSlug {
 		if hasID {
 			resp.Diagnostics.AddError(
@@ -170,36 +171,49 @@ func (d *instanceDataSource) Read(ctx context.Context, req datasource.ReadReques
 	if hasID {
 		// An id is unique — never resolve or send the organization
 		// attribute on this form.
-		lookup = fmt.Sprintf("id %q", data.ID.ValueString())
-		in, err = d.pd.client.GetInstance(ctx, data.ID.ValueString())
+		lookup = fmt.Sprintf("id %q", id)
+		in, err = d.pd.client.GetInstance(ctx, id)
 	} else {
+		orgSpec, hasOrg := nonEmptyValue(data.Organization)
+		providerOrg, hasProviderOrg := nonEmptyValue(d.pd.organization)
 		orgID := ""
-		// Resolve the org only when the caller gave one (attribute or
-		// provider default). With neither, the lookup runs unfiltered:
-		// the server answers from the token's memberships and names the
-		// remedy if the slug still matches more than one row.
-		if knownString(data.Organization) || knownString(d.pd.organization) {
-			orgID = resolveOrgID(ctx, d.pd.client, data.Organization, d.pd.organization, &resp.Diagnostics)
+		// Resolve the org only when the caller gave a non-empty one
+		// (attribute or provider default). With neither, the lookup runs
+		// unfiltered: the server answers from the token's memberships
+		// and names the remedy if the slug still matches more than one
+		// row. Empty strings are unset, exactly like null.
+		if hasOrg || hasProviderOrg {
+			orgID = resolveOrgID(ctx, d.pd.client, optionalString(orgSpec), optionalString(providerOrg), &resp.Diagnostics)
 			if resp.Diagnostics.HasError() {
 				return
 			}
 		}
-		lookup = fmt.Sprintf("slug %q", data.Slug.ValueString())
-		if org := stringValue(data.Organization); org != "" {
-			lookup += fmt.Sprintf(" in organization %q", org)
-		} else if org := stringValue(d.pd.organization); org != "" {
-			lookup += fmt.Sprintf(" in organization %q", org)
+		lookup = fmt.Sprintf("slug %q", slug)
+		if hasOrg {
+			lookup += fmt.Sprintf(" in organization %q", orgSpec)
+		} else if hasProviderOrg {
+			lookup += fmt.Sprintf(" in organization %q", providerOrg)
 		}
-		in, err = d.pd.client.GetInstanceBySlug(ctx, data.Slug.ValueString(), orgID)
+		in, err = d.pd.client.GetInstanceBySlug(ctx, slug, orgID)
 	}
 	if err != nil {
 		var apiErr *client.APIError
-		if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
-			resp.Diagnostics.AddError(
-				"Instance not found",
-				fmt.Sprintf("No instance with %s is visible to this token.", lookup),
-			)
-			return
+		if errors.As(err, &apiErr) {
+			switch {
+			case apiErr.Status == http.StatusNotFound:
+				resp.Diagnostics.AddError(
+					"Instance not found",
+					fmt.Sprintf("No instance with %s is visible to this token.", lookup),
+				)
+				return
+			case apiErr.Status == http.StatusBadRequest && apiErrorHasCode(apiErr, "multiple_results"):
+				resp.Diagnostics.AddError(
+					"Ambiguous instance slug",
+					fmt.Sprintf("More than one visible instance matches %s. Set \"organization\" to narrow the lookup, or use \"id\" instead. Server: %v",
+						lookup, apiErr),
+				)
+				return
+			}
 		}
 		resp.Diagnostics.AddError("Unable to read the Instance", err.Error())
 		return
@@ -210,9 +224,10 @@ func (d *instanceDataSource) Read(ctx context.Context, req datasource.ReadReques
 }
 
 // mapInstanceDataSource writes the wire's detail fields into the data
-// source model. A pending row's nulls map to null types values; FK ids
-// absent from the response map to null too (the sparse fieldset asks
-// for them, but an older server may omit them).
+// source model. A pending row's namespace/deployed_at nulls map to
+// null types values; FK ids absent from the response map to null too
+// (the sparse fieldset asks for them, but an older server may omit
+// them — a present-but-wrong-typed value is shape drift upstream).
 func mapInstanceDataSource(data *instanceDataSourceModel, in client.Instance) {
 	data.ID = types.StringValue(in.ID)
 	data.Name = types.StringValue(in.Name)
@@ -228,7 +243,34 @@ func mapInstanceDataSource(data *instanceDataSourceModel, in client.Instance) {
 	data.AppVersionID = types.StringPointerValue(stringPointer(in.AppVersionID))
 }
 
-// knownString reports whether a config value is set and known.
-func knownString(v types.String) bool {
-	return !v.IsNull() && !v.IsUnknown()
+// nonEmptyValue returns a configured string's trimmed value and
+// whether it is set, known, and non-empty. Empty strings (and
+// whitespace-only strings) are unset: `id = ""` must not request the
+// collection and `organization = ""` must not go through org
+// resolution.
+func nonEmptyValue(v types.String) (string, bool) {
+	if v.IsNull() || v.IsUnknown() {
+		return "", false
+	}
+	s := strings.TrimSpace(v.ValueString())
+	return s, s != ""
+}
+
+// optionalString maps an already-trimmed value back to a types.String
+// for resolveOrgID — empty is null.
+func optionalString(s string) types.String {
+	if s == "" {
+		return types.StringNull()
+	}
+	return types.StringValue(s)
+}
+
+// apiErrorHasCode reports whether the API's errors array carries code.
+func apiErrorHasCode(apiErr *client.APIError, code string) bool {
+	for _, e := range apiErr.Errors {
+		if e.Code == code {
+			return true
+		}
+	}
+	return false
 }

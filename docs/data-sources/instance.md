@@ -48,23 +48,25 @@ Computed:
 - `status` — the state machine's status.
 - `exposure` — `"public"` or `"private"`.
 - `always_on` — whether the instance opts out of scale-to-zero.
-- `image` — the deployed image (null before the first deploy).
-- `port` — the deployed app's port (null before the first deploy).
+- `image` — the app version's image, set at create (not deploy-derived).
+- `port` — the app version's port, set at create (not deploy-derived).
 - `deployed_at` — when the current deploy was enqueued (null before the
   first deploy).
 - `organization_id` — the owning organization's id.
-- `app_version_id` — the deployed app version's id.
+- `app_version_id` — the instance's app version id, set at create.
 
 ## Notes
 
 **Exactly one lookup form.** Setting both `id` and `slug`, or neither,
 is an error at read time — the provider refuses before calling the API.
+Empty (or whitespace-only) strings count as unset.
 
 **Ambiguous slugs.** A slug is unique only per cluster
 (`[:slug, :cluster_id]`), not globally. A slug that still matches more
 than one visible row is the API's `400` (`multiple_results`) — pass
-`organization` to narrow it, or use the instance `id`. The server names
-that remedy in the error detail, and the provider surfaces it verbatim.
+`organization` to narrow it, or use the instance `id`. The provider
+reports an `Ambiguous instance slug` diagnostic with that remedy and
+includes the server's detail.
 
 **Not found.** An unknown id, an unknown slug, and an instance in an
 organization you are not a member of are all the API's `404`; the
@@ -73,5 +75,6 @@ with its organization context).
 
 **Sparse fieldset.** The provider requests the detail field set plus
 `organization_id` and `app_version_id`, so both ids are filled when the
-server has them. A pending row's deploy-derived fields (`namespace`,
-`image`, `port`, `deployed_at`) map to null, not an error.
+server has them. `image`, `port`, and `app_version_id` are set at create
+from the app version; only `namespace` and `deployed_at` are null on a
+pending row. Absent FK ids map to null rather than an error.

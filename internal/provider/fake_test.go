@@ -361,13 +361,24 @@ const (
 	]}`
 
 	// The create response: status pending, namespace/deployed_at null,
-	// image/port derived server-side.
+	// image/port derived at create from the app version. The route's
+	// default field set omits the FK ids.
 	createResponse = `{"data": {"id": "inst-1", "type": "instance", "attributes": {
 		"name": "Blog", "slug": "velvety-otter-1234", "namespace": null,
 		"status": "pending", "exposure": "public", "always_on": false,
 		"image": "reg/app:1.0", "port": 3000, "healthcheck_path": "/",
 		"storage_mount_path": "/data", "file_access": false,
 		"cpu_cores": "0.5", "memory_mb": 256, "storage_gb": 1, "deployed_at": null}}}`
+
+	// A pending row read through the sparse fieldset: the FK ids are
+	// present, namespace/deployed_at null, image/port create-time.
+	pendingDetailDoc = `{"data": {"id": "inst-1", "type": "instance", "attributes": {
+		"name": "Blog", "slug": "velvety-otter-1234", "namespace": null,
+		"status": "pending", "exposure": "public", "always_on": false,
+		"image": "reg/app:1.0", "port": 3000, "healthcheck_path": "/",
+		"storage_mount_path": "/data", "file_access": false,
+		"cpu_cores": "0.5", "memory_mb": 256, "storage_gb": 1, "deployed_at": null,
+		"organization_id": "org-1", "app_version_id": "ver-1"}}}`
 
 	runningDoc = `{"data": {"id": "inst-1", "type": "instance", "attributes": {
 		"name": "Blog", "slug": "velvety-otter-1234", "namespace": "fluxvale-app-inst-1",
