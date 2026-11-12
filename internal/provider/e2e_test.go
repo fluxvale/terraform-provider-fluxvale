@@ -167,6 +167,16 @@ resource "fluxvale_access_gateway" "g" {
   auth_key       = "tskey-smoke"
   instances      = [fluxvale_instance.b.id]
 }
+
+# The lookup data source, both forms, against the created row: slug is
+# the cross-stack handle; id is the unambiguous one.
+data "fluxvale_instance" "b_by_slug" {
+  slug = fluxvale_instance.b.slug
+}
+
+data "fluxvale_instance" "b_by_id" {
+  id = fluxvale_instance.b.id
+}
 `
 	writeModule := func(envLine string) {
 		t.Helper()
@@ -235,6 +245,34 @@ resource "fluxvale_access_gateway" "g" {
 		t.Fatalf("fluxvale_instance.b is not in state")
 		return ""
 	}
+	// dataSourceAttrs returns a fluxvale_instance data source's state
+	// attributes — the real-tofu proof of the lookup forms.
+	dataSourceAttrs := func(name string) map[string]any {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(work, "terraform.tfstate"))
+		if err != nil {
+			t.Fatalf("read terraform state: %v", err)
+		}
+		var st struct {
+			Resources []struct {
+				Mode, Type, Name string
+				Instances        []struct {
+					Attributes map[string]any `json:"attributes"`
+				} `json:"instances"`
+			} `json:"resources"`
+		}
+		if err := json.Unmarshal(raw, &st); err != nil {
+			t.Fatalf("decode terraform state: %v", err)
+		}
+		for _, res := range st.Resources {
+			if res.Mode != "data" || res.Type != "fluxvale_instance" || res.Name != name || len(res.Instances) == 0 {
+				continue
+			}
+			return res.Instances[0].Attributes
+		}
+		t.Fatalf("data.fluxvale_instance.%s is not in state", name)
+		return nil
+	}
 	assertEnvPlan := func(out string) {
 		t.Helper()
 		if strings.Contains(out, "must be replaced") {
@@ -245,6 +283,28 @@ resource "fluxvale_access_gateway" "g" {
 		}
 	}
 	idBefore := instanceBID()
+
+	// The data source read both forms against the row it just created:
+	// the slug lookup and the id lookup agree, and the sparse fieldset
+	// filled both FK ids.
+	bySlug := dataSourceAttrs("b_by_slug")
+	byID := dataSourceAttrs("b_by_id")
+	if bySlug["id"] != idBefore || byID["id"] != idBefore {
+		t.Fatalf("data source ids = %v/%v, want the created instance's id %q",
+			bySlug["id"], byID["id"], idBefore)
+	}
+	if bySlug["name"] != "smoke-b" || bySlug["slug"] != "velvety-otter-2" {
+		t.Fatalf("data.fluxvale_instance.b_by_slug = %v/%v, want smoke-b/velvety-otter-2",
+			bySlug["name"], bySlug["slug"])
+	}
+	if bySlug["organization_id"] != "org-1" || bySlug["app_version_id"] != "ver-1" {
+		t.Fatalf("data source FK ids = %v/%v, want org-1/ver-1 from the sparse fieldset",
+			bySlug["organization_id"], bySlug["app_version_id"])
+	}
+	if byID["slug"] != bySlug["slug"] {
+		t.Fatalf("data.fluxvale_instance.b_by_id slug = %v, want the same row as the slug lookup %v",
+			byID["slug"], bySlug["slug"])
+	}
 
 	// Change SMOKE, add ADDED, remove DROP — one in-place merge PATCH.
 	writeModule(`  env_vars    = { SMOKE = "2", ADDED = "yes" }`)
@@ -340,6 +400,19 @@ resource "fluxvale_access_gateway" "g" {
 	me := fake.nthReq(t, "GET", "/api/v1/me")
 	if me.auth != "Bearer fvpat_e2e" {
 		t.Fatalf("/me Authorization = %q, want Bearer fvpat_e2e", me.auth)
+	}
+
+	// The slug lookup really hit the by-slug route (plans re-read data
+	// sources, so the count is not fixed — at least one is the claim).
+	bySlugReads := 0
+	for _, r := range fake.all() {
+		if r.method == "GET" && strings.HasPrefix(r.path, "/api/v1/instances/by-slug/") {
+			bySlugReads++
+		}
+	}
+	if bySlugReads == 0 {
+		t.Fatalf("no GET /api/v1/instances/by-slug/… among the recorded traffic — the slug data source never read\nfull traffic:\n%s",
+			fake.trafficDump())
 	}
 
 	// The destroy sequence has an order, not just counts: each
@@ -606,11 +679,12 @@ func newSmokeFake(t *testing.T) *smokeFake {
 		id := f.instanceID(t, fmt.Sprint(attrs["name"]))
 		f.mu.Lock()
 		// Enough running entries for the initial apply (wait + final
-		// read), the two env steps' plan refreshes + post-update reads,
-		// and destroy's refresh. The post-DELETE GET 404s via the
-		// deleted marker, not this script.
-		script := make([]func() smokeResp, 0, 11)
-		for range 10 {
+		// read + the by-id data source's read), the two env steps' plan
+		// refreshes + post-update reads, the data source re-reads on
+		// each plan, and destroy's refresh. The post-DELETE GET 404s via
+		// the deleted marker, not this script.
+		script := make([]func() smokeResp, 0, 15)
+		for range 14 {
 			script = append(script, func() smokeResp { return r200(f.instanceDoc(id, "running")) })
 		}
 		script = append(script, func() smokeResp { return smokeResp{http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`} })
@@ -627,6 +701,19 @@ func newSmokeFake(t *testing.T) *smokeFake {
 	// body assertions caught exactly that). The posture/deploy/stop
 	// PATCH verbs answer a full parseable doc (the create path
 	// discards it, the client still parses).
+	// The by-slug lookup (#731 T2) is more specific than the subtree
+	// pattern below, so it wins: the data source's slug form reads the
+	// created row by its generated slug.
+	mux.HandleFunc("GET /api/v1/instances/by-slug/{slug}", func(w http.ResponseWriter, r *http.Request) {
+		f.record(r, nil)
+		id := f.instanceBySlugID(r.PathValue("slug"))
+		if id == "" || f.isDeleted(id) {
+			f.json(w, http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`)
+			return
+		}
+		f.json(w, http.StatusOK, f.instanceDoc(id, "running"))
+	})
+
 	mux.HandleFunc("/api/v1/instances/", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		if r.Body != nil {
@@ -781,6 +868,22 @@ func (f *smokeFake) isDeleted(id string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.deleted[id]
+}
+
+// instanceBySlugID maps the fake's generated slug back to its row id —
+// the by-slug route's lookup key.
+func (f *smokeFake) instanceBySlugID(slug string) string {
+	suffix, ok := strings.CutPrefix(slug, "velvety-otter-")
+	if !ok {
+		return ""
+	}
+	id := "inst-" + suffix
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.posture[id]; !ok {
+		return ""
+	}
+	return id
 }
 
 // instanceID maps a create body's name to the fake's row id — stable

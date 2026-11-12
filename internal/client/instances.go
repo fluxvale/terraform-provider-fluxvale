@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 )
 
@@ -189,6 +190,30 @@ func (c *Client) GetInstance(ctx context.Context, id string) (Instance, error) {
 	instance, err := instanceFromResource(doc.Data)
 	if err != nil {
 		return Instance{}, shapeDrift("GET /api/v1/instances/"+id, doc.Data.ID, err)
+	}
+	return instance, nil
+}
+
+// GetInstanceBySlug calls GET /api/v1/instances/by-slug/:slug — the
+// slug lookup the fluxvale_instance data source rides (#731 T2). It
+// requests the same sparse fieldset as GetInstance: the route's
+// @detail_fields omit organization_id/app_version_id, and the data
+// source maps both. A slug is unique only per [:slug, :cluster_id],
+// so organizationID narrows the lookup when the caller has an org
+// context ("" omits the parameter — the server answers from the
+// token's memberships, and a still-ambiguous slug is its 400).
+func (c *Client) GetInstanceBySlug(ctx context.Context, slug, organizationID string) (Instance, error) {
+	path := "/api/v1/instances/by-slug/" + url.PathEscape(slug) + "?fields[instance]=" + detailFields
+	if organizationID != "" {
+		path += "&organization_id=" + url.QueryEscape(organizationID)
+	}
+	doc, err := c.Do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return Instance{}, err
+	}
+	instance, err := instanceFromResource(doc.Data)
+	if err != nil {
+		return Instance{}, shapeDrift("GET /api/v1/instances/by-slug/"+slug, doc.Data.ID, err)
 	}
 	return instance, nil
 }

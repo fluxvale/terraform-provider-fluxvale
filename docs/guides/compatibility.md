@@ -17,6 +17,7 @@ done silently in 0.x:
   - `fluxvale_custom_domain`
   - `fluxvale_apps` (data source — the catalog)
   - `fluxvale_app_versions` (data source)
+  - `fluxvale_instance` (data source — read by id or slug)
 - Attribute names that mirror the `/api/v1` field names they map
 
 ALLOWED TO MOVE while 0.x: computed/status fields, new schema

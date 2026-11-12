@@ -48,6 +48,7 @@ Data sources:
 
 - [`fluxvale_apps`](data-sources/apps.md) — the catalog
 - [`fluxvale_app_versions`](data-sources/app_versions.md) — one app's versions
+- [`fluxvale_instance`](data-sources/instance.md) — read an instance by id or slug
 
 Guides: [Installing the provider](guides/install.md) · [Compatibility contract](guides/compatibility.md) · [The owner stack example](https://github.com/fluxvale/terraform-provider-fluxvale/tree/main/examples/owner-stack) · [The personal-stack example](https://github.com/fluxvale/terraform-provider-fluxvale/tree/main/examples/personal-stack)
 
