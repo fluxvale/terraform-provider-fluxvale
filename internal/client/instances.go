@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 )
 
@@ -45,6 +46,9 @@ const detailFields = "name,slug,namespace,status,exposure,always_on,image,port,"
 	"deployed_at,organization_id,app_version_id"
 
 func instanceFromResource(row Resource) (Instance, error) {
+	if row.ID == "" {
+		return Instance{}, fmt.Errorf("data.id is missing or empty")
+	}
 	name, err := attrString(row.Attributes, "name")
 	if err != nil {
 		return Instance{}, err
@@ -68,9 +72,9 @@ func instanceFromResource(row Resource) (Instance, error) {
 	if alwaysOn == nil {
 		return Instance{}, fmt.Errorf("always_on is missing or null")
 	}
-	// The deploy-derived fields are null on a pending row — absent, not
-	// drift. The FK ids are absent from the create/PATCH responses'
-	// route-default field set; only GetInstance asks for them.
+	// namespace/deployed_at are null on a pending row — absent, not
+	// drift. image/port are set at create (derived from the app
+	// version), so they normally ride every response.
 	namespace, err := attrOptString(row.Attributes, "namespace")
 	if err != nil {
 		return Instance{}, err
@@ -99,8 +103,17 @@ func instanceFromResource(row Resource) (Instance, error) {
 	if err != nil {
 		return Instance{}, err
 	}
-	orgID, _ := attrOptString(row.Attributes, "organization_id")
-	versionID, _ := attrOptString(row.Attributes, "app_version_id")
+	// The FK ids are absent from the create/PATCH responses' route-default
+	// field set (only GetInstance/GetInstanceBySlug ask for them); absent
+	// stays nil. A PRESENT but wrong-typed value is shape drift.
+	orgID, err := attrOptString(row.Attributes, "organization_id")
+	if err != nil {
+		return Instance{}, err
+	}
+	versionID, err := attrOptString(row.Attributes, "app_version_id")
+	if err != nil {
+		return Instance{}, err
+	}
 	return Instance{
 		ID:             row.ID,
 		Name:           name,
@@ -189,6 +202,30 @@ func (c *Client) GetInstance(ctx context.Context, id string) (Instance, error) {
 	instance, err := instanceFromResource(doc.Data)
 	if err != nil {
 		return Instance{}, shapeDrift("GET /api/v1/instances/"+id, doc.Data.ID, err)
+	}
+	return instance, nil
+}
+
+// GetInstanceBySlug calls GET /api/v1/instances/by-slug/:slug — the
+// slug lookup the fluxvale_instance data source rides (#731 T2). It
+// requests the same sparse fieldset as GetInstance: the route's
+// @detail_fields omit organization_id/app_version_id, and the data
+// source maps both. A slug is unique only per [:slug, :cluster_id],
+// so organizationID narrows the lookup when the caller has an org
+// context ("" omits the parameter — the server answers from the
+// token's memberships, and a still-ambiguous slug is its 400).
+func (c *Client) GetInstanceBySlug(ctx context.Context, slug, organizationID string) (Instance, error) {
+	path := "/api/v1/instances/by-slug/" + url.PathEscape(slug) + "?fields[instance]=" + detailFields
+	if organizationID != "" {
+		path += "&organization_id=" + url.QueryEscape(organizationID)
+	}
+	doc, err := c.Do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return Instance{}, err
+	}
+	instance, err := instanceFromResource(doc.Data)
+	if err != nil {
+		return Instance{}, shapeDrift("GET /api/v1/instances/by-slug/"+slug, doc.Data.ID, err)
 	}
 	return instance, nil
 }

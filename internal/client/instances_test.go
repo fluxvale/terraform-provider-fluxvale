@@ -196,6 +196,152 @@ func TestGetInstance404IsTyped(t *testing.T) {
 	}
 }
 
+// The slug lookup rides its own route with the same sparse fieldset as
+// GetInstance; the org context is an optional query argument (#731 T2).
+func TestGetInstanceBySlugPathQueryAndParse(t *testing.T) {
+	doc := `{"data": {"id": "inst-1", "type": "instance", "attributes": {
+		"name": "Blog", "slug": "velvety-otter-1234", "namespace": null,
+		"status": "running", "exposure": "public", "always_on": true,
+		"image": "reg/app:1.0", "port": 3000,
+		"healthcheck_path": "/", "storage_mount_path": "/data", "file_access": false,
+		"cpu_cores": "0.5", "memory_mb": 256, "storage_gb": 1, "deployed_at": null,
+		"organization_id": "org-7", "app_version_id": "ver-3"
+	}}}`
+
+	cases := []struct {
+		name       string
+		org        string
+		wantOrgArg string
+	}{
+		{name: "bare slug", org: ""},
+		{name: "slug with organization", org: "org-7", wantOrgArg: "org-7"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			var gotQuery url.Values
+			srv := handlerServer(t, func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotQuery, _ = url.ParseQuery(r.URL.RawQuery)
+				fmt.Fprint(w, doc)
+			})
+
+			c := New(srv.URL, "fvpat_test", "test", srv.Client())
+			instance, err := c.GetInstanceBySlug(context.Background(), "velvety-otter-1234", tc.org)
+			if err != nil {
+				t.Fatalf("GetInstanceBySlug: %v", err)
+			}
+
+			if want := "/api/v1/instances/by-slug/velvety-otter-1234"; gotPath != want {
+				t.Errorf("path = %q, want %q", gotPath, want)
+			}
+
+			fields := gotQuery["fields[instance]"]
+			if len(fields) != 1 {
+				t.Fatalf("fields[instance] = %v, want one parameter", fields)
+			}
+			for _, want := range []string{"name", "status", "organization_id", "app_version_id"} {
+				if !strings.Contains(fields[0], want) {
+					t.Errorf("fields[instance] = %q, missing %q", fields[0], want)
+				}
+			}
+			if strings.Contains(fields[0], "env_vars") || strings.Contains(fields[0], "status_message") {
+				t.Errorf("fields[instance] = %q — must not request the hidden pair", fields[0])
+			}
+
+			if got := gotQuery.Get("organization_id"); got != tc.wantOrgArg {
+				t.Errorf("organization_id = %q, want %q", got, tc.wantOrgArg)
+			}
+			if tc.wantOrgArg == "" {
+				if _, ok := gotQuery["organization_id"]; ok {
+					t.Error("organization_id sent — an empty org context omits the parameter")
+				}
+			}
+
+			if instance.ID != "inst-1" || instance.Name != "Blog" || instance.Slug != "velvety-otter-1234" {
+				t.Errorf("instance identity = %s/%s/%s, want inst-1/Blog/velvety-otter-1234",
+					instance.ID, instance.Name, instance.Slug)
+			}
+			if instance.Namespace != nil || instance.DeployedAt != nil {
+				t.Errorf("namespace/deployed_at = %v/%v, want nil on the null fields", instance.Namespace, instance.DeployedAt)
+			}
+			if instance.Status != "running" || instance.Exposure != "public" || !instance.AlwaysOn {
+				t.Errorf("status/exposure/always_on = %s/%s/%t, want running/public/true",
+					instance.Status, instance.Exposure, instance.AlwaysOn)
+			}
+			if instance.Image == nil || *instance.Image != "reg/app:1.0" || instance.Port == nil || *instance.Port != 3000 {
+				t.Errorf("image/port = %v/%v, want the detail document's values", instance.Image, instance.Port)
+			}
+			if instance.OrganizationID != "org-7" || instance.AppVersionID != "ver-3" {
+				t.Errorf("FK ids = %q/%q, want org-7/ver-3", instance.OrganizationID, instance.AppVersionID)
+			}
+		})
+	}
+}
+
+// The slug reaches the URL-escaped path segment — a slug with a slash
+// or space cannot retarget the request.
+func TestGetInstanceBySlugEscapesTheSlug(t *testing.T) {
+	var gotPath string
+	srv := handlerServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		fmt.Fprint(w, instanceDocument("inst-1", "running"))
+	})
+
+	c := New(srv.URL, "fvpat_test", "test", srv.Client())
+	if _, err := c.GetInstanceBySlug(context.Background(), "a/b c", ""); err != nil {
+		t.Fatalf("GetInstanceBySlug: %v", err)
+	}
+
+	want := "/api/v1/instances/by-slug/a%2Fb%20c"
+	if gotPath != want {
+		t.Errorf("escaped path = %q, want %q", gotPath, want)
+	}
+}
+
+// A response with attributes but no data.id is shape drift — the data
+// source must not report a successful lookup with an id it never got.
+func TestGetInstanceBySlugEmptyIDIsShapeDrift(t *testing.T) {
+	doc := `{"data": {"type": "instance", "attributes": {
+		"name": "Blog", "slug": "velvety-otter-1234", "status": "running",
+		"exposure": "public", "always_on": false
+	}}}`
+	srv := testServer(t, http.StatusOK, doc)
+	c := New(srv.URL, "fvpat_test", "test", srv.Client())
+
+	_, err := c.GetInstanceBySlug(context.Background(), "velvety-otter-1234", "")
+	if err == nil || !strings.Contains(err.Error(), "data.id") {
+		t.Fatalf("err = %v, want the empty-id shape-drift error", err)
+	}
+}
+
+// A present-but-wrong-typed FK is shape drift, not a silent null. The
+// create/PATCH responses omit the pair and keep parsing as absent.
+func TestInstanceWrongTypedFKIDsAreShapeDrift(t *testing.T) {
+	cases := []struct {
+		field string
+		raw   string
+	}{
+		{field: "organization_id", raw: "7"},
+		{field: "app_version_id", raw: `["ver-1"]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			doc := fmt.Sprintf(`{"data": {"id": "inst-1", "type": "instance", "attributes": {
+				"name": "Blog", "slug": "velvety-otter-1234", "status": "running",
+				"exposure": "public", "always_on": false, %q: %s
+			}}}`, tc.field, tc.raw)
+			srv := testServer(t, http.StatusOK, doc)
+			c := New(srv.URL, "fvpat_test", "test", srv.Client())
+
+			_, err := c.GetInstance(context.Background(), "inst-1")
+			if err == nil || !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("err = %v, want a shape-drift error naming %s", err, tc.field)
+			}
+		})
+	}
+}
+
 // The lifecycle PATCH verbs carry the resource id plus an attributes
 // object — the exact shape the route tests send (empty attributes for
 // the no-input verbs).

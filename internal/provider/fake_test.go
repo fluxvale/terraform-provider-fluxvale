@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -37,7 +38,12 @@ type fakeAPI struct {
 	versionsDoc  string
 	postResponse string // POST /instances (201)
 	instanceGets []scriptedResponse
-	deleteStatus int
+	// instanceBySlugDoc/instanceBySlugStatus answer
+	// GET /instances/by-slug/:slug — the slug lookup's scripted arm
+	// (the non-zero status is the 404 not-found case).
+	instanceBySlugDoc    string
+	instanceBySlugStatus int
+	deleteStatus         int
 	// failPatch/failPatchStatus: when a PATCH path carries this suffix,
 	// the fake answers with this status and an errors body — the
 	// PATCH-failure arm.
@@ -71,6 +77,7 @@ type fakeAPI struct {
 
 type recordedRequest struct {
 	method, path, auth string
+	query              url.Values
 	body               map[string]any
 }
 
@@ -130,6 +137,16 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		f.json(w, http.StatusCreated, f.postResponse)
 	})
 	mux.HandleFunc("/api/v1/instances/", func(w http.ResponseWriter, r *http.Request) {
+		// The backup setting's read lives under this subtree; the
+		// POST/PATCH/DELETE family keeps its routed patterns. Handling
+		// the GET here leaves the by-slug pattern below conflict-free
+		// (its literal segment overlaps {id}/backup-setting).
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/backup-setting") {
+			f.record(r, nil)
+			f.scriptedGet(w, r, &f.backupGets)
+			return
+		}
+
 		var body map[string]any
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -162,6 +179,19 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		}
 	})
 
+	// The by-slug lookup (#731 T2): a specific method+path pattern, so
+	// it wins over the /instances/ subtree above. Records the request
+	// (tests read recordedRequest.query) and answers the standard detail
+	// document; the status field scripts the 404 arm.
+	mux.HandleFunc("GET /api/v1/instances/by-slug/{slug}", func(w http.ResponseWriter, r *http.Request) {
+		f.record(r, nil)
+		status := f.instanceBySlugStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		f.json(w, status, f.instanceBySlugDoc)
+	})
+
 	// The in-place env merge (#731): the specific method+pattern wins
 	// over the /instances/ subtree above. Recorded with its set/remove
 	// body; answers the standard instance detail document. The
@@ -185,10 +215,6 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.record(r, body)
 		f.json(w, http.StatusCreated, f.backupPostDoc)
-	})
-	mux.HandleFunc("GET /api/v1/instances/{id}/backup-setting", func(w http.ResponseWriter, r *http.Request) {
-		f.record(r, nil)
-		f.scriptedGet(w, r, &f.backupGets)
 	})
 	mux.HandleFunc("/api/v1/backup-settings/", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
@@ -282,7 +308,8 @@ func (f *fakeAPI) record(r *http.Request, body map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, recordedRequest{
-		method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"), body: body,
+		method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"),
+		query: r.URL.Query(), body: body,
 	})
 }
 
@@ -334,13 +361,24 @@ const (
 	]}`
 
 	// The create response: status pending, namespace/deployed_at null,
-	// image/port derived server-side.
+	// image/port derived at create from the app version. The route's
+	// default field set omits the FK ids.
 	createResponse = `{"data": {"id": "inst-1", "type": "instance", "attributes": {
 		"name": "Blog", "slug": "velvety-otter-1234", "namespace": null,
 		"status": "pending", "exposure": "public", "always_on": false,
 		"image": "reg/app:1.0", "port": 3000, "healthcheck_path": "/",
 		"storage_mount_path": "/data", "file_access": false,
 		"cpu_cores": "0.5", "memory_mb": 256, "storage_gb": 1, "deployed_at": null}}}`
+
+	// A pending row read through the sparse fieldset: the FK ids are
+	// present, namespace/deployed_at null, image/port create-time.
+	pendingDetailDoc = `{"data": {"id": "inst-1", "type": "instance", "attributes": {
+		"name": "Blog", "slug": "velvety-otter-1234", "namespace": null,
+		"status": "pending", "exposure": "public", "always_on": false,
+		"image": "reg/app:1.0", "port": 3000, "healthcheck_path": "/",
+		"storage_mount_path": "/data", "file_access": false,
+		"cpu_cores": "0.5", "memory_mb": 256, "storage_gb": 1, "deployed_at": null,
+		"organization_id": "org-1", "app_version_id": "ver-1"}}}`
 
 	runningDoc = `{"data": {"id": "inst-1", "type": "instance", "attributes": {
 		"name": "Blog", "slug": "velvety-otter-1234", "namespace": "fluxvale-app-inst-1",

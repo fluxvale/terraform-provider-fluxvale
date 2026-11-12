@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -172,6 +173,24 @@ func nullConfig(ctx context.Context, t *testing.T, sch schema.Schema, set map[st
 	return tfsdk.Config{Schema: sch, Raw: tftypes.NewValue(objType, vals)}
 }
 
+// nullConfigWithUnknown builds nullConfig's value but marks the named
+// string attributes unknown — the computed-input case.
+func nullConfigWithUnknown(ctx context.Context, t *testing.T, sch schema.Schema, set map[string]string, unknown ...string) tfsdk.Config {
+	t.Helper()
+	objType := sch.Type().TerraformType(ctx).(tftypes.Object)
+	vals := make(map[string]tftypes.Value, len(objType.AttributeTypes))
+	for name, attrType := range objType.AttributeTypes {
+		vals[name] = tftypes.NewValue(attrType, nil)
+	}
+	for name, s := range set {
+		vals[name] = tftypes.NewValue(tftypes.String, s)
+	}
+	for _, name := range unknown {
+		vals[name] = tftypes.NewValue(tftypes.String, tftypes.UnknownValue)
+	}
+	return tfsdk.Config{Schema: sch, Raw: tftypes.NewValue(objType, vals)}
+}
+
 func appsSchema(ctx context.Context, t *testing.T) schema.Schema {
 	t.Helper()
 	d := NewAppsDataSource().(*appsDataSource)
@@ -192,6 +211,563 @@ func appVersionsSchema(ctx context.Context, t *testing.T) schema.Schema {
 		t.Fatalf("schema diagnostics: %+v", resp.Diagnostics)
 	}
 	return resp.Schema
+}
+
+func instanceSchema(ctx context.Context, t *testing.T) schema.Schema {
+	t.Helper()
+	d := NewInstanceDataSource().(*instanceDataSource)
+	resp := &datasource.SchemaResponse{}
+	d.Schema(ctx, datasource.SchemaRequest{}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("schema diagnostics: %+v", resp.Diagnostics)
+	}
+	return resp.Schema
+}
+
+// readInstanceDataSource drives one Read through the framework entry
+// point with an all-null config plus the given string attributes.
+func readInstanceDataSource(t *testing.T, d *instanceDataSource, sch schema.Schema, set map[string]string) *datasource.ReadResponse {
+	t.Helper()
+	ctx := context.Background()
+	resp := &datasource.ReadResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	d.Read(ctx, datasource.ReadRequest{Config: nullConfig(ctx, t, sch, set)}, resp)
+	return resp
+}
+
+func TestInstanceDataSourceByID(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+	f := newFakeAPI(t)
+	f.instanceGets = []scriptedResponse{script(200, runningDoc)}
+
+	d := NewInstanceDataSource().(*instanceDataSource)
+	cfgResp := &datasource.ConfigureResponse{}
+	d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+	assertNoErrors(t, &cfgResp.Diagnostics)
+
+	resp := readInstanceDataSource(t, d, sch, map[string]string{
+		"id":           "inst-1",
+		"organization": "acme",
+	})
+	assertNoErrors(t, &resp.Diagnostics)
+
+	var got instanceDataSourceModel
+	if diags := resp.State.Get(ctx, &got); diags.HasError() {
+		t.Fatalf("State.Get: %v", diags)
+	}
+	if got.ID.ValueString() != "inst-1" || got.Slug.ValueString() != "velvety-otter-1234" {
+		t.Errorf("id/slug = %q/%q, want the wire's identity", got.ID.ValueString(), got.Slug.ValueString())
+	}
+	if got.Name.ValueString() != "Blog" || got.Status.ValueString() != "running" ||
+		got.Exposure.ValueString() != "public" || got.AlwaysOn.ValueBool() {
+		t.Errorf("name/status/exposure/always_on = %q/%q/%q/%t, want Blog/running/public/false",
+			got.Name.ValueString(), got.Status.ValueString(), got.Exposure.ValueString(), got.AlwaysOn.ValueBool())
+	}
+	if got.Namespace.ValueString() != "fluxvale-app-inst-1" || got.Image.ValueString() != "reg/app:1.0" {
+		t.Errorf("namespace/image = %q/%q, want the detail document's values",
+			got.Namespace.ValueString(), got.Image.ValueString())
+	}
+	if got.Port.ValueInt64() != 3000 || got.DeployedAt.ValueString() != "2026-11-06T10:00:00Z" {
+		t.Errorf("port/deployed_at = %d/%q, want 3000/the detail document's timestamp",
+			got.Port.ValueInt64(), got.DeployedAt.ValueString())
+	}
+	// The sparse fieldset's FK ids fill the computed pair.
+	if got.OrganizationID.ValueString() != "org-1" || got.AppVersionID.ValueString() != "ver-1" {
+		t.Errorf("organization_id/app_version_id = %q/%q, want org-1/ver-1",
+			got.OrganizationID.ValueString(), got.AppVersionID.ValueString())
+	}
+
+	req := findOne(t, f.all(), "GET", "/api/v1/instances/inst-1")
+	if fields := req.query.Get("fields[instance]"); !strings.Contains(fields, "organization_id") ||
+		!strings.Contains(fields, "app_version_id") {
+		t.Errorf("fields[instance] = %q, want the detail set plus both FK ids", fields)
+	}
+	if _, ok := req.query["organization_id"]; ok {
+		t.Error("organization_id sent on an id lookup — the id form is unique")
+	}
+	// The id form must not resolve the configured organization at all.
+	for _, r := range f.all() {
+		if strings.HasSuffix(r.path, "/organizations") {
+			t.Errorf("GET %s — the id form ignores the organization attribute", r.path)
+		}
+	}
+}
+
+func TestInstanceDataSourceBySlug(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+	f := newFakeAPI(t)
+	f.instanceBySlugDoc = runningDoc
+
+	d := NewInstanceDataSource().(*instanceDataSource)
+	cfgResp := &datasource.ConfigureResponse{}
+	d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+	assertNoErrors(t, &cfgResp.Diagnostics)
+
+	resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "velvety-otter-1234"})
+	assertNoErrors(t, &resp.Diagnostics)
+
+	var got instanceDataSourceModel
+	if diags := resp.State.Get(ctx, &got); diags.HasError() {
+		t.Fatalf("State.Get: %v", diags)
+	}
+	if got.ID.ValueString() != "inst-1" || got.Slug.ValueString() != "velvety-otter-1234" ||
+		got.Name.ValueString() != "Blog" || got.Status.ValueString() != "running" {
+		t.Errorf("lookup result = %s/%s/%s/%s, want inst-1/velvety-otter-1234/Blog/running",
+			got.ID.ValueString(), got.Slug.ValueString(), got.Name.ValueString(), got.Status.ValueString())
+	}
+	if got.OrganizationID.ValueString() != "org-1" || got.AppVersionID.ValueString() != "ver-1" {
+		t.Errorf("organization_id/app_version_id = %q/%q, want org-1/ver-1",
+			got.OrganizationID.ValueString(), got.AppVersionID.ValueString())
+	}
+
+	req := findOne(t, f.all(), "GET", "/api/v1/instances/by-slug/velvety-otter-1234")
+	if fields := req.query.Get("fields[instance]"); !strings.Contains(fields, "organization_id") ||
+		!strings.Contains(fields, "app_version_id") {
+		t.Errorf("fields[instance] = %q, want the detail set plus both FK ids", fields)
+	}
+	if _, ok := req.query["organization_id"]; ok {
+		t.Error("organization_id sent with neither the attribute nor the provider default set")
+	}
+	for _, r := range f.all() {
+		if strings.HasSuffix(r.path, "/organizations") {
+			t.Errorf("GET %s — no org context was configured, so nothing should be resolved", r.path)
+		}
+	}
+}
+
+func TestInstanceDataSourceBySlugWithOrganization(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+
+	t.Run("the data source attribute resolves to the org id", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.instanceBySlugDoc = runningDoc
+		f.orgsDoc = orgsDoc
+
+		d := NewInstanceDataSource().(*instanceDataSource)
+		cfgResp := &datasource.ConfigureResponse{}
+		d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+		assertNoErrors(t, &cfgResp.Diagnostics)
+
+		resp := readInstanceDataSource(t, d, sch, map[string]string{
+			"slug":         "velvety-otter-1234",
+			"organization": "acme",
+		})
+		assertNoErrors(t, &resp.Diagnostics)
+
+		findOne(t, f.all(), "GET", "/api/v1/organizations")
+		req := findOne(t, f.all(), "GET", "/api/v1/instances/by-slug/velvety-otter-1234")
+		if got := req.query.Get("organization_id"); got != "org-1" {
+			t.Errorf("organization_id = %q, want org-1 (acme resolved to its id)", got)
+		}
+	})
+
+	t.Run("the provider default is the fallback", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.instanceBySlugDoc = runningDoc
+		f.orgsDoc = orgsDoc
+
+		pd := f.testClient()
+		pd.organization = types.StringValue("b-co")
+		d := NewInstanceDataSource().(*instanceDataSource)
+		cfgResp := &datasource.ConfigureResponse{}
+		d.Configure(ctx, datasource.ConfigureRequest{ProviderData: pd}, cfgResp)
+		assertNoErrors(t, &cfgResp.Diagnostics)
+
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "velvety-otter-1234"})
+		assertNoErrors(t, &resp.Diagnostics)
+
+		req := findOne(t, f.all(), "GET", "/api/v1/instances/by-slug/velvety-otter-1234")
+		if got := req.query.Get("organization_id"); got != "org-2" {
+			t.Errorf("organization_id = %q, want org-2 (the provider-level default)", got)
+		}
+	})
+}
+
+func TestInstanceDataSourceEmptyOrganizationIsUnset(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+
+	t.Run("empty organization attribute", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.instanceBySlugDoc = runningDoc
+		f.orgsDoc = orgsDoc
+		d := NewInstanceDataSource().(*instanceDataSource)
+		cfgResp := &datasource.ConfigureResponse{}
+		d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+		assertNoErrors(t, &cfgResp.Diagnostics)
+
+		resp := readInstanceDataSource(t, d, sch, map[string]string{
+			"slug":         "velvety-otter-1234",
+			"organization": "",
+		})
+		assertNoErrors(t, &resp.Diagnostics)
+
+		req := findOne(t, f.all(), "GET", "/api/v1/instances/by-slug/velvety-otter-1234")
+		if _, ok := req.query["organization_id"]; ok {
+			t.Error("organization_id sent for an empty organization attribute")
+		}
+		for _, r := range f.all() {
+			if strings.HasSuffix(r.path, "/organizations") {
+				t.Errorf("GET %s — an empty organization must not trigger resolution", r.path)
+			}
+		}
+	})
+
+	t.Run("empty provider default", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.instanceBySlugDoc = runningDoc
+		f.orgsDoc = orgsDoc
+		pd := f.testClient()
+		pd.organization = types.StringValue("")
+		d := NewInstanceDataSource().(*instanceDataSource)
+		cfgResp := &datasource.ConfigureResponse{}
+		d.Configure(ctx, datasource.ConfigureRequest{ProviderData: pd}, cfgResp)
+		assertNoErrors(t, &cfgResp.Diagnostics)
+
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "velvety-otter-1234"})
+		assertNoErrors(t, &resp.Diagnostics)
+
+		req := findOne(t, f.all(), "GET", "/api/v1/instances/by-slug/velvety-otter-1234")
+		if _, ok := req.query["organization_id"]; ok {
+			t.Error("organization_id sent for an empty provider default")
+		}
+	})
+}
+
+func TestInstanceDataSourceLookupValueWhitespace(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+
+	newDS := func(t *testing.T, providerOrg types.String) (*instanceDataSource, *fakeAPI) {
+		t.Helper()
+		f := newFakeAPI(t)
+		f.instanceBySlugDoc = runningDoc
+		f.orgsDoc = orgsDoc
+		pd := f.testClient()
+		if !providerOrg.IsNull() {
+			pd.organization = providerOrg
+		}
+		d := NewInstanceDataSource().(*instanceDataSource)
+		cfgResp := &datasource.ConfigureResponse{}
+		d.Configure(ctx, datasource.ConfigureRequest{ProviderData: pd}, cfgResp)
+		assertNoErrors(t, &cfgResp.Diagnostics)
+		return d, f
+	}
+
+	t.Run("whitespace-only id is unset", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"id": "   "})
+		assertError(t, &resp.Diagnostics, "exactly one", "id", "slug")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — whitespace-only is unset", reqs)
+		}
+	})
+
+	t.Run("whitespace-only slug is unset", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "   "})
+		assertError(t, &resp.Diagnostics, "exactly one", "id", "slug")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — whitespace-only is unset", reqs)
+		}
+	})
+
+	t.Run("whitespace-only organization is unset", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{
+			"slug":         "velvety-otter-1234",
+			"organization": "   ",
+		})
+		assertNoErrors(t, &resp.Diagnostics)
+		req := findOne(t, f.all(), "GET", "/api/v1/instances/by-slug/velvety-otter-1234")
+		if _, ok := req.query["organization_id"]; ok {
+			t.Error("organization_id sent for a whitespace-only organization")
+		}
+		for _, r := range f.all() {
+			if strings.HasSuffix(r.path, "/organizations") {
+				t.Errorf("GET %s — whitespace-only must not trigger org resolution", r.path)
+			}
+		}
+	})
+
+	t.Run("padded id is rejected without a request", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"id": " inst-1 "})
+		assertError(t, &resp.Diagnostics, "Invalid id", "padded", "leading or trailing whitespace")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — the padded value must not reach the API", reqs)
+		}
+	})
+
+	t.Run("padded slug is rejected without a request", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": " velvety-otter-1234 "})
+		assertError(t, &resp.Diagnostics, "Invalid slug", "padded", "leading or trailing whitespace")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — the padded value must not reach the API", reqs)
+		}
+	})
+
+	t.Run("padded organization is rejected without a request", func(t *testing.T) {
+		d, f := newDS(t, types.StringNull())
+		resp := readInstanceDataSource(t, d, sch, map[string]string{
+			"slug":         "velvety-otter-1234",
+			"organization": " acme ",
+		})
+		assertError(t, &resp.Diagnostics, "Invalid organization", "padded", "leading or trailing whitespace")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — the padded value must not reach the API", reqs)
+		}
+	})
+
+	t.Run("padded provider organization is rejected without a request", func(t *testing.T) {
+		d, f := newDS(t, types.StringValue(" acme "))
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "velvety-otter-1234"})
+		assertError(t, &resp.Diagnostics, "Invalid provider organization", "padded", "leading or trailing whitespace")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — the padded value must not reach the API", reqs)
+		}
+	})
+}
+
+func TestInstanceDataSourceExactlyOneLookup(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+
+	cases := []struct {
+		name string
+		set  map[string]string
+	}{
+		{name: "both forms", set: map[string]string{"id": "inst-1", "slug": "velvety-otter-1234"}},
+		{name: "neither form", set: nil},
+		{name: "empty id", set: map[string]string{"id": ""}},
+		{name: "empty slug", set: map[string]string{"slug": ""}},
+		{name: "both empty", set: map[string]string{"id": "", "slug": ""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeAPI(t)
+			d := NewInstanceDataSource().(*instanceDataSource)
+			cfgResp := &datasource.ConfigureResponse{}
+			d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+			assertNoErrors(t, &cfgResp.Diagnostics)
+
+			resp := readInstanceDataSource(t, d, sch, tc.set)
+			assertError(t, &resp.Diagnostics, "exactly one", "id", "slug")
+			if reqs := f.all(); len(reqs) != 0 {
+				t.Errorf("requests = %+v, want none — the arity refusal is client-side", reqs)
+			}
+		})
+	}
+
+	t.Run("unknown value", func(t *testing.T) {
+		f := newFakeAPI(t)
+		d := NewInstanceDataSource().(*instanceDataSource)
+		cfgResp := &datasource.ConfigureResponse{}
+		d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+		assertNoErrors(t, &cfgResp.Diagnostics)
+
+		resp := &datasource.ReadResponse{
+			State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+		}
+		d.Read(ctx, datasource.ReadRequest{
+			Config: nullConfigWithUnknown(ctx, t, sch, nil, "id"),
+		}, resp)
+		assertError(t, &resp.Diagnostics, "exactly one", "id", "slug")
+		if reqs := f.all(); len(reqs) != 0 {
+			t.Errorf("requests = %+v, want none — an unknown value is not a lookup form", reqs)
+		}
+	})
+}
+
+func TestInstanceDataSourceNotFound(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+
+	t.Run("by slug", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.instanceBySlugStatus = http.StatusNotFound
+		f.instanceBySlugDoc = `{"errors": [{"title": "Not Found"}]}`
+
+		d := NewInstanceDataSource().(*instanceDataSource)
+		cfgResp := &datasource.ConfigureResponse{}
+		d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+		assertNoErrors(t, &cfgResp.Diagnostics)
+
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "no-such-slug"})
+		assertError(t, &resp.Diagnostics, "Instance not found", "no-such-slug")
+	})
+
+	t.Run("by id", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.instanceGets = []scriptedResponse{script(http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`)}
+
+		d := NewInstanceDataSource().(*instanceDataSource)
+		cfgResp := &datasource.ConfigureResponse{}
+		d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+		assertNoErrors(t, &cfgResp.Diagnostics)
+
+		resp := readInstanceDataSource(t, d, sch, map[string]string{"id": "gone"})
+		assertError(t, &resp.Diagnostics, "Instance not found", "gone")
+	})
+}
+
+func TestInstanceDataSourceAmbiguousSlug(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+	f := newFakeAPI(t)
+	f.instanceBySlugStatus = http.StatusBadRequest
+	f.instanceBySlugDoc = `{"errors": [{"status": "400", "code": "multiple_results", "title": "Multiple results",
+		"detail": "more than one record matches this query — narrow the filter; for an instance slug lookup, pass organization_id or use the instance id"}]}`
+
+	d := NewInstanceDataSource().(*instanceDataSource)
+	cfgResp := &datasource.ConfigureResponse{}
+	d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+	assertNoErrors(t, &cfgResp.Diagnostics)
+
+	resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "dup-slug"})
+	assertError(t, &resp.Diagnostics, "Ambiguous instance slug", "dup-slug", "organization", "id",
+		"more than one record matches this query")
+}
+
+func TestInstanceDataSource400Fallbacks(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+
+	cases := []struct {
+		name string
+		byID bool
+		doc  string
+	}{
+		{
+			name: "another 400 code on a slug lookup",
+			doc:  `{"errors": [{"status": "400", "code": "invalid_argument", "title": "InvalidArgument", "detail": "bad input"}]}`,
+		},
+		{
+			name: "empty errors array",
+			doc:  `{"errors": []}`,
+		},
+		{
+			name: "no parseable errors body",
+			doc:  ``,
+		},
+		{
+			name: "multiple_results on an id lookup is not the slug remedy",
+			byID: true,
+			doc:  `{"errors": [{"status": "400", "code": "multiple_results", "title": "Multiple results", "detail": "more than one record matches"}]}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeAPI(t)
+			if tc.byID {
+				f.instanceGets = []scriptedResponse{script(http.StatusBadRequest, tc.doc)}
+			} else {
+				f.instanceBySlugStatus = http.StatusBadRequest
+				f.instanceBySlugDoc = tc.doc
+			}
+
+			d := NewInstanceDataSource().(*instanceDataSource)
+			cfgResp := &datasource.ConfigureResponse{}
+			d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+			assertNoErrors(t, &cfgResp.Diagnostics)
+
+			cfg := map[string]string{"slug": "velvety-otter-1234"}
+			if tc.byID {
+				cfg = map[string]string{"id": "inst-1"}
+			}
+			resp := readInstanceDataSource(t, d, sch, cfg)
+			assertError(t, &resp.Diagnostics, "Unable to read the Instance")
+			for _, d := range resp.Diagnostics.Errors() {
+				if strings.Contains(d.Summary(), "Ambiguous instance slug") {
+					t.Errorf("summary = %q — only the slug multiple_results answer is the ambiguity remedy", d.Summary())
+				}
+			}
+		})
+	}
+}
+
+func TestInstanceDataSourceForbiddenSurfacesVerbatim(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+	f := newFakeAPI(t)
+	f.instanceBySlugStatus = http.StatusForbidden
+	f.instanceBySlugDoc = `{"errors": [{"title": "Forbidden", "detail": "token is missing the required scope instances:read"}]}`
+
+	d := NewInstanceDataSource().(*instanceDataSource)
+	cfgResp := &datasource.ConfigureResponse{}
+	d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+	assertNoErrors(t, &cfgResp.Diagnostics)
+
+	resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "velvety-otter-1234"})
+	assertError(t, &resp.Diagnostics, "Unable to read the Instance",
+		"token is missing the required scope instances:read")
+}
+
+// A pending row read through the sparse fieldset carries the create-time
+// image/port and FK ids; only namespace/deployed_at are null.
+func TestInstanceDataSourcePendingRowNulls(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+	f := newFakeAPI(t)
+	f.instanceBySlugDoc = pendingDetailDoc
+
+	d := NewInstanceDataSource().(*instanceDataSource)
+	cfgResp := &datasource.ConfigureResponse{}
+	d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+	assertNoErrors(t, &cfgResp.Diagnostics)
+
+	resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "velvety-otter-1234"})
+	assertNoErrors(t, &resp.Diagnostics)
+
+	var got instanceDataSourceModel
+	if diags := resp.State.Get(ctx, &got); diags.HasError() {
+		t.Fatalf("State.Get: %v", diags)
+	}
+	if got.Status.ValueString() != "pending" {
+		t.Errorf("status = %q, want pending", got.Status.ValueString())
+	}
+	if !got.Namespace.IsNull() || !got.DeployedAt.IsNull() {
+		t.Errorf("namespace/deployed_at = %v/%v, want null on a pending row", got.Namespace, got.DeployedAt)
+	}
+	if got.OrganizationID.ValueString() != "org-1" || got.AppVersionID.ValueString() != "ver-1" {
+		t.Errorf("organization_id/app_version_id = %q/%q, want the sparse fieldset's ids",
+			got.OrganizationID.ValueString(), got.AppVersionID.ValueString())
+	}
+	if got.Image.ValueString() != "reg/app:1.0" || got.Port.ValueInt64() != 3000 {
+		t.Errorf("image/port = %q/%d, want the create-time app-version values",
+			got.Image.ValueString(), got.Port.ValueInt64())
+	}
+}
+
+// A response that omits the FK ids (the create/PATCH field set) stays
+// tolerant: absent means null, not drift.
+func TestInstanceDataSourceAbsentFKIDs(t *testing.T) {
+	ctx := context.Background()
+	sch := instanceSchema(ctx, t)
+	f := newFakeAPI(t)
+	f.instanceBySlugDoc = createResponse
+
+	d := NewInstanceDataSource().(*instanceDataSource)
+	cfgResp := &datasource.ConfigureResponse{}
+	d.Configure(ctx, datasource.ConfigureRequest{ProviderData: f.testClient()}, cfgResp)
+	assertNoErrors(t, &cfgResp.Diagnostics)
+
+	resp := readInstanceDataSource(t, d, sch, map[string]string{"slug": "velvety-otter-1234"})
+	assertNoErrors(t, &resp.Diagnostics)
+
+	var got instanceDataSourceModel
+	if diags := resp.State.Get(ctx, &got); diags.HasError() {
+		t.Fatalf("State.Get: %v", diags)
+	}
+	if !got.OrganizationID.IsNull() || !got.AppVersionID.IsNull() {
+		t.Errorf("organization_id/app_version_id = %v/%v, want null when absent",
+			got.OrganizationID, got.AppVersionID)
+	}
 }
 
 func TestAppsDataSourceConfigureAndRead(t *testing.T) {
