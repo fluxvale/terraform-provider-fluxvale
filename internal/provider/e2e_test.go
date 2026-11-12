@@ -99,7 +99,10 @@ func TestRealTofuSmoke(t *testing.T) {
 		t.Fatalf("write CLI config: %v", err)
 	}
 
-	module := fmt.Sprintf(`
+	// The module template's one variable line is env_vars — the env
+	// steps below rewrite it (a changed map, then an omitted one:
+	// null means "clear the keys this resource managed").
+	moduleTemplate := `
 terraform {
   required_providers {
     fluxvale = {
@@ -136,7 +139,7 @@ resource "fluxvale_instance" "b" {
   memory_mb   = 512
   storage_gb  = 2
   exposure    = "private"
-  env_vars    = { SMOKE = "1" }
+%s
 }
 
 # The example stack's headline posture: always-on (never sleeps).
@@ -164,10 +167,15 @@ resource "fluxvale_access_gateway" "g" {
   auth_key       = "tskey-smoke"
   instances      = [fluxvale_instance.b.id]
 }
-`, fake.URL)
-	if err := os.WriteFile(filepath.Join(work, "main.tf"), []byte(module), 0o600); err != nil {
-		t.Fatalf("write module: %v", err)
+`
+	writeModule := func(envLine string) {
+		t.Helper()
+		module := fmt.Sprintf(moduleTemplate, fake.URL, envLine)
+		if err := os.WriteFile(filepath.Join(work, "main.tf"), []byte(module), 0o600); err != nil {
+			t.Fatalf("write module: %v", err)
+		}
 	}
+	writeModule(`  env_vars    = { SMOKE = "1", DROP = "bye" }`)
 
 	runTofu := func(cliConfig string, args ...string) string {
 		t.Helper()
@@ -193,17 +201,82 @@ resource "fluxvale_access_gateway" "g" {
 		t.Fatalf("plan did not add the five resources:\n%s", plan)
 	}
 	runTofu(clipath, "apply", "tfplan")
+
+	// The instance id from the applied state — every env step below
+	// must keep the same row. (tofu output -raw would carry the
+	// dev_overrides warning on stderr; the state file is exact.)
+	instanceBID := func() string {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(work, "terraform.tfstate"))
+		if err != nil {
+			t.Fatalf("read terraform state: %v", err)
+		}
+		var st struct {
+			Resources []struct {
+				Type, Name string
+				Instances  []struct {
+					Attributes map[string]any `json:"attributes"`
+				} `json:"instances"`
+			} `json:"resources"`
+		}
+		if err := json.Unmarshal(raw, &st); err != nil {
+			t.Fatalf("decode terraform state: %v", err)
+		}
+		for _, res := range st.Resources {
+			if res.Type != "fluxvale_instance" || res.Name != "b" || len(res.Instances) == 0 {
+				continue
+			}
+			id, _ := res.Instances[0].Attributes["id"].(string)
+			if id == "" {
+				t.Fatalf("fluxvale_instance.b has no id in state")
+			}
+			return id
+		}
+		t.Fatalf("fluxvale_instance.b is not in state")
+		return ""
+	}
+	assertEnvPlan := func(out string) {
+		t.Helper()
+		if strings.Contains(out, "must be replaced") {
+			t.Fatalf("env change planned a replacement:\n%s", out)
+		}
+		if !strings.Contains(out, "0 to add") || !strings.Contains(out, "1 to change") || !strings.Contains(out, "0 to destroy") {
+			t.Fatalf("env change was not one in-place update:\n%s", out)
+		}
+	}
+	idBefore := instanceBID()
+
+	// Change SMOKE, add ADDED, remove DROP — one in-place merge PATCH.
+	writeModule(`  env_vars    = { SMOKE = "2", ADDED = "yes" }`)
+	assertEnvPlan(runTofu(clipath, "plan", "-out=tfplan"))
+	runTofu(clipath, "apply", "tfplan")
+	if id := instanceBID(); id != idBefore {
+		t.Fatalf("instance b id changed across an env update: %q -> %q", idBefore, id)
+	}
+
+	// Omit env_vars entirely: a null plan clears the remaining keys.
+	writeModule("")
+	clearPlan := runTofu(clipath, "plan", "-out=tfplan")
+	assertEnvPlan(clearPlan)
+	runTofu(clipath, "apply", "tfplan")
+	if id := instanceBID(); id != idBefore {
+		t.Fatalf("instance b id changed across an env clear: %q -> %q", idBefore, id)
+	}
+
 	runTofu(clipath, "destroy", "-auto-approve")
 
 	// The wire story: create → posture PATCHes (exposure on b,
-	// always-on on c) → deploy → backup row → gateway + attach;
-	// destroy: forget-only gateway, row DELETE, all three instances
-	// DELETEd to a polled 404.
+	// always-on on c) → deploy → backup row → gateway + attach; two
+	// in-place env merges on b; destroy: forget-only gateway, row
+	// DELETE, all three instances DELETEd to a polled 404. The env
+	// updates add no POST and no replacement: both counts stay at the
+	// create-time figures.
 	fake.wantCounts(t,
 		countExact("POST", "/api/v1/instances", 3),
 		countSuffix("PATCH", "/exposure", 1),
 		countSuffix("PATCH", "/always-on", 1),
 		countSuffix("PATCH", "/deploy", 3),
+		countSuffix("PATCH", "/env", 2),
 		countSuffix("POST", "/backup-setting", 1),
 		countExact("POST", "/api/v1/access-gateways", 1),
 		countContains("POST", "/attachments", 1),
@@ -233,6 +306,21 @@ resource "fluxvale_access_gateway" "g" {
 	// The always-on PATCH carried the headline posture — the example
 	// stack's "always-on forge" claim, now exercised.
 	fake.wantActionAttrs(t, "PATCH", "/always-on", "always_on", true)
+
+	// The env merges, in order: change SMOKE + add ADDED + remove DROP,
+	// then the omitted map removes the remaining managed keys. Both
+	// target instance b's row — the state-id asserts above held it.
+	var envPatches []smokeReq
+	for _, r := range fake.all() {
+		if r.method == "PATCH" && strings.HasSuffix(r.path, "/env") {
+			envPatches = append(envPatches, r)
+		}
+	}
+	if len(envPatches) != 2 {
+		t.Fatalf("env PATCH count = %d, want 2", len(envPatches))
+	}
+	wantEnvPatch(t, envPatches[0], map[string]string{"SMOKE": "2", "ADDED": "yes"}, []string{"DROP"})
+	wantEnvPatch(t, envPatches[1], map[string]string{}, []string{"ADDED", "SMOKE"})
 
 	// The attach POST paired the private instance's actual id.
 	fake.wantAttachInstance(t, "smoke-b")
@@ -399,6 +487,13 @@ type smokeFake struct {
 	// what the PATCHes applied
 	posture map[string]*smokePosture
 
+	// deleted marks ids whose DELETE has been served: their GETs 404
+	// immediately, so the teardown's wait-gone poll does not consume
+	// the scripted running entries the env-step refreshes need. The
+	// running-until-404 retry itself is covered by
+	// TestDeleteWrapperEndToEnd.
+	deleted map[string]bool
+
 	// instance creates, by config name — the fake's row-id contract
 	// (the smoke module's names are stable)
 	createIDs map[string]string
@@ -461,9 +556,11 @@ func newSmokeFake(t *testing.T) *smokeFake {
 			},
 		},
 		// Instance GET scripts are seeded per create (see the POST
-		// handler): apply's wait + final read, then destroy's refresh +
-		// the polled 404 — the last entry repeats for safety.
+		// handler): the apply, the env steps' refreshes and reads, and
+		// destroy's refresh. A DELETE marks the id so the wait-gone poll
+		// 404s immediately instead of eating scripted running entries.
 		posture:   map[string]*smokePosture{},
+		deleted:   map[string]bool{},
 		createIDs: map[string]string{},
 	}
 
@@ -508,12 +605,16 @@ func newSmokeFake(t *testing.T) *smokeFake {
 		attrs, _ := body["data"].(map[string]any)["attributes"].(map[string]any)
 		id := f.instanceID(t, fmt.Sprint(attrs["name"]))
 		f.mu.Lock()
-		f.gets[id] = []func() smokeResp{
-			func() smokeResp { return r200(f.instanceDoc(id, "running")) },
-			func() smokeResp { return r200(f.instanceDoc(id, "running")) },
-			func() smokeResp { return r200(f.instanceDoc(id, "running")) },
-			func() smokeResp { return smokeResp{http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`} },
+		// Enough running entries for the initial apply (wait + final
+		// read), the two env steps' plan refreshes + post-update reads,
+		// and destroy's refresh. The post-DELETE GET 404s via the
+		// deleted marker, not this script.
+		script := make([]func() smokeResp, 0, 11)
+		for range 10 {
+			script = append(script, func() smokeResp { return r200(f.instanceDoc(id, "running")) })
 		}
+		script = append(script, func() smokeResp { return smokeResp{http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`} })
+		f.gets[id] = script
 		f.posture[id] = &smokePosture{exposure: "public", alwaysOn: false}
 		f.mu.Unlock()
 		f.json(w, http.StatusCreated, f.createDoc(id, attrs))
@@ -541,8 +642,13 @@ func newSmokeFake(t *testing.T) *smokeFake {
 		}
 		switch r.Method {
 		case http.MethodGet:
+			if f.isDeleted(id) {
+				f.json(w, http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`)
+				return
+			}
 			f.scripted(w, rest)
 		case http.MethodDelete:
+			f.markDeleted(id)
 			f.json(w, http.StatusOK, f.instanceDoc(id, "pending"))
 		case http.MethodPatch:
 			if attrs := fattrsOf(body); attrs != nil && action != "" {
@@ -561,6 +667,16 @@ func newSmokeFake(t *testing.T) *smokeFake {
 		default:
 			f.json(w, http.StatusMethodNotAllowed, `{"errors": [{"title": "Method Not Allowed"}]}`)
 		}
+	})
+
+	// The env merge verb (#731): the specific pattern wins over the
+	// /instances/ subtree. Records the set/remove diff and answers the
+	// standard detail document.
+	mux.HandleFunc("PATCH /api/v1/instances/{id}/env", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.record(r, body)
+		f.json(w, http.StatusOK, f.instanceDoc(r.PathValue("id"), "running"))
 	})
 
 	// Backups: the routed settings family — create + delete cover the
@@ -652,6 +768,19 @@ func (f *smokeFake) all() []smokeReq {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]smokeReq(nil), f.reqs...)
+}
+
+// markDeleted records a served DELETE — later GETs on the id 404.
+func (f *smokeFake) markDeleted(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted[id] = true
+}
+
+func (f *smokeFake) isDeleted(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deleted[id]
 }
 
 // instanceID maps a create body's name to the fake's row id — stable
@@ -813,6 +942,39 @@ func (f *smokeFake) wantActionAttrs(t *testing.T, method, action string, pairs .
 		return
 	}
 	t.Fatalf("no %s request for action %q among the recorded traffic", method, action)
+}
+
+// wantEnvPatch asserts one merge PATCH carried the exact set/remove
+// diff — the in-place env contract's body (#731, ADR-0052).
+func wantEnvPatch(t *testing.T, r smokeReq, wantSet map[string]string, wantRemove []string) {
+	t.Helper()
+	attrs := fattrs(t, r)
+	set, ok := attrs["set"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s %s: set = %#v, want an object", r.method, r.path, attrs["set"])
+	}
+	if len(set) != len(wantSet) {
+		t.Errorf("%s %s: set = %v, want %v", r.method, r.path, set, wantSet)
+	}
+	for key, want := range wantSet {
+		if got, _ := set[key].(string); got != want {
+			t.Errorf("%s %s: set[%q] = %#v, want %q", r.method, r.path, key, set[key], want)
+		}
+	}
+	rawRemove, ok := attrs["remove"].([]any)
+	if !ok || len(rawRemove) != len(wantRemove) {
+		t.Fatalf("%s %s: remove = %#v, want %v", r.method, r.path, attrs["remove"], wantRemove)
+	}
+	gotRemove := make(map[string]bool, len(rawRemove))
+	for _, v := range rawRemove {
+		s, _ := v.(string)
+		gotRemove[s] = true
+	}
+	for _, key := range wantRemove {
+		if !gotRemove[key] {
+			t.Errorf("%s %s: remove = %v, missing %q", r.method, r.path, rawRemove, key)
+		}
+	}
 }
 
 // wantAttachInstance asserts the gateway's pairing POST named the

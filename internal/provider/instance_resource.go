@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/fluxvale/terraform-provider-fluxvale/internal/client"
@@ -12,7 +13,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -70,7 +70,7 @@ type instanceModel struct {
 
 func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "An instance of a catalog app version — FluxVale's unit of workload. The name, version identity, and organization are create-only (the API has no rename/version-change/org-change routes), so changing them replaces the instance. The allocation resizes in place: the API's resize is stopped-first (the provider sequences stop → resize → start), CPU/RAM both ways, storage up-only.",
+		Description: "An instance of a catalog app version — FluxVale's unit of workload. The name, version identity, and organization are create-only (the API has no rename/version-change/org-change routes), so changing them replaces the instance. `env_vars` updates in place through one merge PATCH; the allocation resizes in place: the API's resize is stopped-first (the provider sequences stop → resize → start), CPU/RAM both ways, storage up-only.",
 		Attributes: map[string]schema.Attribute{
 			"organization": schema.StringAttribute{
 				Optional: true,
@@ -94,7 +94,13 @@ func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				MarkdownDescription: "The catalog app_version id to deploy. Either this or `app` + `app_version` (a slug " +
 					"and version string, resolved through the catalog); if both forms are set this id wins, and neither is an error. " +
 					"The resolved id is written back from the wire. Create-only (no version-change route) — changing it replaces the instance.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				// Keep the resolved id known across in-place updates (an
+				// env merge must not replace a slug-configured instance);
+				// a slug or id change still plans a replacement.
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"app": schema.StringAttribute{
 				Optional:      true,
@@ -123,10 +129,15 @@ func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Optional:    true,
 				Sensitive:   true,
 				MarkdownDescription: "Environment variables for the deploy (merged over the app version's defaults, " +
-					"server-side). Write-only: the API never echoes env_vars, so plan can't see server-side drift by design, " +
-					"and the configured value is kept verbatim in state. Changing it replaces the instance (the API only " +
-					"accepts env vars at create).",
-				PlanModifiers: []planmodifier.Map{mapplanmodifier.RequiresReplace()},
+					"server-side). Updates in place: the provider diffs state against the plan into one merge PATCH; " +
+					"a null/omitted map clears the keys this resource previously managed, and a null element is " +
+					"rejected — remove the key instead (an empty string is a value). Write-only: the API never echoes " +
+					"env_vars, so plan can't see server-side drift by design, and the configured value is kept " +
+					"verbatim in state. Deployer-composed keys (OIDC recipe, backing URLs, instance URL) are refused " +
+					"on set and skipped on remove, so an apply that stops naming one converges. First-run contract " +
+					"`env` keys are fixed — set and remove both refuse with 400 — and `forbidden_env` keys refuse set " +
+					"but allow remove; a contract `env` key already in state dead-ends until removed from state/config " +
+					"by hand.",
 			},
 			"running": schema.BoolAttribute{
 				Optional:    true,
@@ -145,6 +156,10 @@ func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"id": schema.StringAttribute{
 				Computed:    true,
 				Description: "The instance id — also the terraform import argument.",
+				// In-place updates must not turn the id unknown: anything
+				// referencing it (backups, gateway attachments) would plan
+				// a replacement off an unknown id.
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"slug": schema.StringAttribute{
 				Computed:    true,
@@ -494,11 +509,11 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 
 // updateInstance applies the in-place changes — the stopped-first
 // resize (stop → resize → start, honoring the desired running
-// posture), stop/start flips with their precondition GETs, always-on,
-// exposure — then refreshes from a fresh read. Only a set (non-null)
-// plan value is managed; removing an attribute stops managing it.
-// Returns true when the instance turned out to be gone (the caller
-// removes it from state).
+// posture), stop/start flips with their precondition GETs, the env
+// merge, always-on, exposure — then refreshes from a fresh read.
+// Only a set (non-null) plan value is managed; removing an attribute
+// stops managing it. Returns true when the instance turned out to be
+// gone (the caller removes it from state).
 func updateInstance(ctx context.Context, pd *providerData, plan, state *instanceModel, diags *diag.Diagnostics) bool {
 	id := plan.ID.ValueString()
 
@@ -514,6 +529,11 @@ func updateInstance(ctx context.Context, pd *providerData, plan, state *instance
 		}
 	}
 
+	applyEnvVars(ctx, pd, plan, state, id, diags)
+	if diags.HasError() {
+		return false
+	}
+
 	applyAlwaysOn(ctx, pd, plan, state, id, diags)
 	if diags.HasError() {
 		return false
@@ -524,6 +544,84 @@ func updateInstance(ctx context.Context, pd *providerData, plan, state *instance
 	}
 
 	return readInstance(ctx, pd, plan, diags)
+}
+
+// applyEnvVars diffs the state map against the plan map and sends one
+// in-place merge PATCH (#731, ADR-0052): set is the keys added or
+// changed, remove the state keys the plan no longer names. A null plan
+// means "no user env" — every key this resource previously managed is
+// removed. There is no status gate: the server owns the status matrix
+// (pending/error/lost get a row-only write, running/starting also
+// update the live Secret, deploying/restoring/deleting refuse).
+//
+// An unknown value cannot be diffed. This is an apply-time
+// impossibility (the framework resolves the plan before Update), but
+// the only honest answer is a warning plus a skip: never send "" for
+// an unknown value and never remove the keys on the strength of an
+// unknown.
+func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceModel, id string, diags *diag.Diagnostics) {
+	const summary = "Instance environment not updated"
+
+	if plan.EnvVars.IsUnknown() {
+		diags.AddWarning(summary, fmt.Sprintf(
+			"instance %s: env_vars is unknown at apply time — skipped the in-place environment update; the keys this resource manages are left untouched.", id))
+		// The wrapper writes the plan back to state; an unknown map
+		// cannot ride state, so keep the prior state's map instead.
+		plan.EnvVars = state.EnvVars
+		return
+	}
+
+	want := map[string]string{}
+	if !plan.EnvVars.IsNull() {
+		for key, value := range plan.EnvVars.Elements() {
+			s, ok := value.(types.String)
+			if !ok || s.IsUnknown() {
+				diags.AddWarning(summary, fmt.Sprintf(
+					"instance %s: env_vars[%q] is unknown at apply time — skipped the in-place environment update; the keys this resource manages are left untouched.", id, key))
+				plan.EnvVars = state.EnvVars
+				return
+			}
+			if s.IsNull() {
+				diags.AddError(
+					"Invalid env_vars",
+					fmt.Sprintf("env_vars[%q] is null — remove the key instead; an empty string is a value", key),
+				)
+				return
+			}
+			want[key] = s.ValueString()
+		}
+	}
+
+	have := map[string]string{}
+	if !state.EnvVars.IsNull() && !state.EnvVars.IsUnknown() {
+		for key, value := range state.EnvVars.Elements() {
+			if s, ok := value.(types.String); ok && !s.IsUnknown() {
+				have[key] = s.ValueString()
+			}
+		}
+	}
+
+	set := make(map[string]string)
+	for key, value := range want {
+		if old, ok := have[key]; !ok || old != value {
+			set[key] = value
+		}
+	}
+	remove := make([]string, 0)
+	for key := range have {
+		if _, ok := want[key]; !ok {
+			remove = append(remove, key)
+		}
+	}
+	sort.Strings(remove)
+
+	if len(set) == 0 && len(remove) == 0 {
+		return
+	}
+
+	if _, err := pd.client.UpdateInstanceEnv(ctx, id, set, remove); err != nil {
+		diags.AddError("Unable to update the Instance environment", err.Error())
+	}
 }
 
 // allocationChanged did the plan move any allocation dimension? All
@@ -764,9 +862,9 @@ func (r *instanceResource) ImportState(ctx context.Context, req resource.ImportS
 	// By instance id: terraform import fluxvale_instance.x <id>. Read
 	// fills the wire-mirrored fields — including the FK ids
 	// (organization_id, app_version_id, asked for via the sparse
-	// fieldset). Only app/app_version (the slug pair) and env_vars have
-	// no wire echo — keep your config matching what you deployed or the
-	// plan will show a replacement.
+	// fieldset). app/app_version (the slug pair) have no wire echo —
+	// keep your config matching what you deployed. env_vars imports
+	// null; the first apply that sets them sends a full set (in place).
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
@@ -820,7 +918,17 @@ func envVarMap(ctx context.Context, v types.Map) (map[string]string, diag.Diagno
 	}
 	out := make(map[string]string, len(elems))
 	for k, val := range elems {
+		if val.IsNull() {
+			diags.AddError(
+				"Invalid env_vars",
+				fmt.Sprintf("env_vars[%q] is null — remove the key instead; an empty string is a value", k),
+			)
+			continue
+		}
 		out[k] = val.ValueString()
+	}
+	if diags.HasError() {
+		return nil, diags
 	}
 	return out, diag.Diagnostics{}
 }

@@ -262,6 +262,110 @@ resource "fluxvale_instance" "big" {
 	})
 }
 
+// accEnvInstanceConfig renders the env-update instance with the given
+// env_vars block (empty omits the attribute — the null-map clear).
+func accEnvInstanceConfig(envBlock string) string {
+	return accVarDecls + `
+variable "app_slug" {
+  type = string
+}
+
+data "fluxvale_app_versions" "test" {
+  app = var.app_slug
+}
+
+resource "fluxvale_instance" "env" {
+  name        = "acc-env"
+  app         = var.app_slug
+  app_version = data.fluxvale_app_versions.test.app_versions[0].version
+  cpu_cores   = 0.5
+  memory_mb   = 256
+  storage_gb  = 1
+` + envBlock + `
+}
+`
+}
+
+// accAppVars is accVars plus the catalog app slug the instance configs
+// resolve their version through.
+func accAppVars(t *testing.T) config.Variables {
+	t.Helper()
+	v := accVars(t)
+	v["app_slug"] = config.StringVariable(accAppSlug())
+	return v
+}
+
+// TestAccInstanceEnvUpdates proves the in-place env merge on the real
+// wire (#731, ADR-0052): create with two vars, change one + add one +
+// remove one, then omit the map — the instance id never changes and no
+// step plans a replacement. Runs nightly; the fake-server tests carry
+// the per-PR proof.
+func TestAccInstanceEnvUpdates(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set — the acceptance lane runs nightly/tags/dispatch, never per-PR (wallet cost)")
+	}
+
+	var id string
+	checkID := func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources["fluxvale_instance.env"]
+		if !ok {
+			return fmt.Errorf("fluxvale_instance.env is not in state")
+		}
+		if id == "" {
+			id = rs.Primary.ID
+			return nil
+		}
+		if rs.Primary.ID != id {
+			return fmt.Errorf("instance id changed across an env update: %q -> %q", id, rs.Primary.ID)
+		}
+		return nil
+	}
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: accProtoV6(),
+		PreCheck:                 func() { accPreCheck(t) },
+		CheckDestroy:             accInstancesGone(t),
+		Steps: []resource.TestStep{
+			{
+				Config:          accEnvInstanceConfig(`  env_vars    = { SMOKE = "1", DROP = "bye" }`),
+				ConfigVariables: accAppVars(t),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("fluxvale_instance.env", "status", "running"),
+					resource.TestCheckResourceAttr("fluxvale_instance.env", "env_vars.SMOKE", "1"),
+					resource.TestCheckResourceAttr("fluxvale_instance.env", "env_vars.DROP", "bye"),
+					checkID,
+				),
+			},
+			{
+				Config:          accEnvInstanceConfig(`  env_vars    = { SMOKE = "2", ADDED = "yes" }`),
+				ConfigVariables: accAppVars(t),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("fluxvale_instance.env", "env_vars.SMOKE", "2"),
+					resource.TestCheckResourceAttr("fluxvale_instance.env", "env_vars.ADDED", "yes"),
+					checkID,
+				),
+			},
+			{
+				Config:          accEnvInstanceConfig(""),
+				ConfigVariables: accAppVars(t),
+				Check: resource.ComposeTestCheckFunc(
+					checkID,
+					func(s *terraform.State) error {
+						rs, ok := s.RootModule().Resources["fluxvale_instance.env"]
+						if !ok {
+							return fmt.Errorf("fluxvale_instance.env is not in state")
+						}
+						if n := rs.Primary.Attributes["env_vars.%"]; n != "" && n != "0" {
+							return fmt.Errorf("env_vars still carries %s keys after the null-map apply", n)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
 // TestAccInstanceBackups is the R2 wiring from the example stack, for
 // real: one instance, one settings row fed by env-provided R2
 // coordinates. Skips as a class without the full set — and the org
