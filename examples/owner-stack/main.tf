@@ -12,7 +12,7 @@ terraform {
   required_providers {
     fluxvale = {
       source  = "registry.terraform.io/fluxvale/fluxvale"
-      version = ">= 0.1" # not on any registry yet — installed per docs/guides/install.md (tf-v0.1.x on the monorepo, v0.2.0+ here)
+      version = ">= 0.3" # in-place env_vars needs 0.3.0+; installs from the public registry
     }
     cloudflare = {
       source  = "cloudflare/cloudflare"

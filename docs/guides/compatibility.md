@@ -25,5 +25,11 @@ ALLOWED TO MOVE while 0.x: computed/status fields, new schema
 attributes, defaults, and anything not listed above. Dogfooding-first —
 the owner is user #1.
 
+## `env_vars` (from 0.3.0)
+
+`env_vars` updates in place from 0.3.0; it is write-only on the wire —
+never echoed — but a normal Terraform attribute, not a Terraform 1.11
+write-only attribute. Plaintext values still live in state.
+
 **1.0 freeze**: when the first non-owner user writes `.tf` against this
 provider. From then on, removals and renames are versioned decisions.

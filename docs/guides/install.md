@@ -4,12 +4,12 @@ page_title: "Installing the provider"
 
 # Installing the provider
 
-Manual-first until the registry listing goes live ([ADR-0019](https://github.com/fluxvale/fluxvale/blob/main/docs/adr/00019-machine-first-api-cli-mcp.md)
-Am. 4 and its extraction follow-up in the monorepo's ADR index): the
-provider installs from this repo's GitHub Releases into a local
-filesystem mirror — or, for dev work, straight off a freshly built
-binary via `dev_overrides`. Once the listing is live, `terraform
-init` / `tofu init` replaces this whole page.
+The provider is on the public registry at
+[registry.terraform.io/fluxvale/fluxvale](https://registry.terraform.io/providers/fluxvale/fluxvale/latest):
+`terraform init` / `tofu init` pulls the signed provider from there.
+For offline, air-gapped, or pinned installs, it also installs from this
+repo's GitHub Releases into a local filesystem mirror — or, for dev
+work, straight off a freshly built binary via `dev_overrides`.
 
 ## 1. Download a release
 
@@ -24,11 +24,10 @@ and verify YOUR line of the sums — a single-platform download can't
 check the whole set:
 
 ```sh
-grep <your-zip> terraform-provider-fluxvale_0.2.1_SHA256SUMS | sha256sum -c -
-# e.g. grep terraform-provider-fluxvale_0.2.1_linux_amd64.zip terraform-provider-fluxvale_0.2.1_SHA256SUMS | sha256sum -c -
-#      macOS: … | shasum -a 256 -c -
-gpg --verify terraform-provider-fluxvale_0.2.1_SHA256SUMS.sig terraform-provider-fluxvale_0.2.1_SHA256SUMS   # after importing the public key:
-# gpg --import https://github.com/fluxvale/terraform-provider-fluxvale/raw/main/terraform-provider-signing.asc
+zip=terraform-provider-fluxvale_0.3.0_linux_amd64.zip   # your platform's zip
+grep "$zip" terraform-provider-fluxvale_0.3.0_SHA256SUMS | sha256sum -c -   # macOS: shasum -a 256 -c -
+gpg --fetch-keys https://github.com/fluxvale/terraform-provider-fluxvale/raw/main/terraform-provider-signing.asc
+gpg --verify terraform-provider-fluxvale_0.3.0_SHA256SUMS.sig terraform-provider-fluxvale_0.3.0_SHA256SUMS
 ```
 
 ## 2. Lay out the filesystem mirror
@@ -42,10 +41,10 @@ filename), and the os/arch names are the registry's vocabulary:
   registry.terraform.io/
     fluxvale/
       fluxvale/
-        terraform-provider-fluxvale_0.2.1_linux_amd64.zip
-        terraform-provider-fluxvale_0.2.1_linux_arm64.zip
-        terraform-provider-fluxvale_0.2.1_darwin_arm64.zip
-        terraform-provider-fluxvale_0.2.1_windows_amd64.zip
+        terraform-provider-fluxvale_0.3.0_linux_amd64.zip
+        terraform-provider-fluxvale_0.3.0_linux_arm64.zip
+        terraform-provider-fluxvale_0.3.0_darwin_arm64.zip
+        terraform-provider-fluxvale_0.3.0_windows_amd64.zip
 ```
 
 Drop the downloaded zips in unchanged — this packed layout is
@@ -117,10 +116,9 @@ the debugger-attached variant (`go run . -debug`).
 This repo IS the registry repository — extracted for exactly that
 ([ADR-0051](https://github.com/fluxvale/fluxvale/blob/main/docs/adr/00051-tfprovider-repo-extraction.md)):
 plain `vX.Y.Z` tags, GPG-signed checksums, the registry manifest per
-release. What remains is the listing itself — a manual org-connect
-step on the registry side. Once it goes live, `terraform init` /
-`tofu init` replaces this whole page, and the mirror recipe above
-becomes the fallback for pinned, offline, or pre-listing installs
-(the compatibility contract in
-[compatibility.md](compatibility.md) is what makes that switch
-non-breaking).
+release, and the live listing at
+[registry.terraform.io/fluxvale/fluxvale](https://registry.terraform.io/providers/fluxvale/fluxvale/latest).
+The mirror recipe above remains the fallback for pinned or offline
+installs (the compatibility contract in
+[compatibility.md](compatibility.md) keeps the stable names above
+non-breaking across upgrades).

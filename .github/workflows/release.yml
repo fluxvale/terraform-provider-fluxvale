@@ -379,21 +379,24 @@ jobs:
           GNUPGHOME="$proof_home" gpg --batch --pinentry-mode loopback --verify "terraform-provider-fluxvale_${version}_SHA256SUMS.sig" "terraform-provider-fluxvale_${version}_SHA256SUMS"
           rm -rf "$proof_home"
 
-      # Install primer: manual-first until the registries list us (the
-      # listing is a manual org-connect step tracked outside this repo);
-      # once live, `terraform init` replaces the mirror recipe.
+      # Install primer: registry-first; the filesystem mirror is the
+      # offline/air-gapped/pinned fallback.
       - name: Compose the release notes
         env:
           REF_NAME: ${{ github.ref_name }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
+          version="${REF_NAME#v}"
           cat > notes.md <<EOF
           ## Install
 
-          Until the registry listing goes live, install from this release into a
-          [filesystem mirror](https://opentofu.org/docs/cli/config/files/): download the zip for
-          your platform, verify your line of the versioned checksums
-          (\`grep <your-zip> terraform-provider-fluxvale_*_SHA256SUMS | sha256sum -c -\`) — the
+          Install from the Terraform Registry — \`terraform init\` / \`tofu init\` pulls the
+          signed provider from [registry.terraform.io/fluxvale/fluxvale](https://registry.terraform.io/providers/fluxvale/fluxvale/latest).
+
+          For offline, air-gapped, or pinned installs, download the zip for your platform
+          and verify your line of the versioned checksums
+          (\`grep terraform-provider-fluxvale_${version}_linux_amd64.zip terraform-provider-fluxvale_${version}_SHA256SUMS | sha256sum -c -\`) — replace
+          \`linux_amd64\` with your platform; on macOS use \`shasum -a 256 -c -\` — the
           signature over the whole set is the \`.sig\` beside it, verifiable against the committed
           [\`terraform-provider-signing.asc\`](${REPO_URL}/blob/${REF_NAME}/terraform-provider-signing.asc).
 
