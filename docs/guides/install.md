@@ -24,10 +24,10 @@ and verify YOUR line of the sums — a single-platform download can't
 check the whole set:
 
 ```sh
-grep <your-zip> terraform-provider-fluxvale_0.2.1_SHA256SUMS | sha256sum -c -
-# e.g. grep terraform-provider-fluxvale_0.2.1_linux_amd64.zip terraform-provider-fluxvale_0.2.1_SHA256SUMS | sha256sum -c -
+grep <your-zip> terraform-provider-fluxvale_0.3.0_SHA256SUMS | sha256sum -c -
+# e.g. grep terraform-provider-fluxvale_0.3.0_linux_amd64.zip terraform-provider-fluxvale_0.3.0_SHA256SUMS | sha256sum -c -
 #      macOS: … | shasum -a 256 -c -
-gpg --verify terraform-provider-fluxvale_0.2.1_SHA256SUMS.sig terraform-provider-fluxvale_0.2.1_SHA256SUMS   # after importing the public key:
+gpg --verify terraform-provider-fluxvale_0.3.0_SHA256SUMS.sig terraform-provider-fluxvale_0.3.0_SHA256SUMS   # after importing the public key:
 # gpg --import https://github.com/fluxvale/terraform-provider-fluxvale/raw/main/terraform-provider-signing.asc
 ```
 
@@ -42,10 +42,10 @@ filename), and the os/arch names are the registry's vocabulary:
   registry.terraform.io/
     fluxvale/
       fluxvale/
-        terraform-provider-fluxvale_0.2.1_linux_amd64.zip
-        terraform-provider-fluxvale_0.2.1_linux_arm64.zip
-        terraform-provider-fluxvale_0.2.1_darwin_arm64.zip
-        terraform-provider-fluxvale_0.2.1_windows_amd64.zip
+        terraform-provider-fluxvale_0.3.0_linux_amd64.zip
+        terraform-provider-fluxvale_0.3.0_linux_arm64.zip
+        terraform-provider-fluxvale_0.3.0_darwin_arm64.zip
+        terraform-provider-fluxvale_0.3.0_windows_amd64.zip
 ```
 
 Drop the downloaded zips in unchanged — this packed layout is
