@@ -93,7 +93,7 @@ walks it.
 cd examples/owner-stack
 cp terraform.tfvars.example terraform.tfvars   # then fill it in
 export FLUXVALE_PAT=fvpat_…                    # never in a file
-tofu init                                      # mirror + registry (cloudflare)
+tofu init                                      # registry defaults (fluxvale + cloudflare); mirror optional
 tofu plan
 tofu apply
 tofu output

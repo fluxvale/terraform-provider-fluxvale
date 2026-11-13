@@ -395,7 +395,8 @@ jobs:
 
           For offline, air-gapped, or pinned installs, download the zip for your platform
           and verify your line of the versioned checksums
-          (\`grep terraform-provider-fluxvale_${version}_linux_amd64.zip terraform-provider-fluxvale_${version}_SHA256SUMS | sha256sum -c -\`) — the
+          (\`grep terraform-provider-fluxvale_${version}_linux_amd64.zip terraform-provider-fluxvale_${version}_SHA256SUMS | sha256sum -c -\`) — replace
+          \`linux_amd64\` with your platform; on macOS use \`shasum -a 256 -c -\` — the
           signature over the whole set is the \`.sig\` beside it, verifiable against the committed
           [\`terraform-provider-signing.asc\`](${REPO_URL}/blob/${REF_NAME}/terraform-provider-signing.asc).
 
