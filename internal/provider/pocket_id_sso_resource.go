@@ -217,13 +217,25 @@ func readPocketIdSso(ctx context.Context, pd *providerData, data *pocketIdSsoMod
 		diags.AddError("Unable to read the PocketID sign-in wiring", err.Error())
 		return false
 	}
+	// The GET was made BY the state's instance id. A case-fold echo is
+	// the same UUID and passes; a materially different instance means
+	// the platform answered with another instance's wiring — a contract
+	// violation. Do not map a single field (client/secret ids included);
+	// the prior state stays intact and the refresh fails loudly.
+	if !strings.EqualFold(wiring.InstanceID, instanceID) {
+		diags.AddError(
+			"The platform answered with another instance's wiring",
+			fmt.Sprintf("GET /api/v1/instances/%s/pocket-id-wiring returned a wiring for instance %q — refusing to refresh "+
+				"(a platform contract violation). The prior state is unchanged; retry the refresh, and inspect the platform "+
+				"if it repeats.", instanceID, wiring.InstanceID),
+		)
+		return false
+	}
 	mapPocketIdSso(data, wiring)
-	// The GET was made BY the state's instance id: that lookup key wins
-	// unconditionally, and a differing echo is ignored (it must never
-	// move the resource identity — a replacement would then disconnect
-	// the wrong instance). A case-fold pocket_id_instance_id echo keeps
-	// the state spelling; a materially different one is the wire's truth
-	// (an out-of-band re-wire), which Read may drift.
+	// The lookup key wins unconditionally for the resource identity; a
+	// case-fold pocket_id_instance_id echo keeps the state spelling,
+	// while a materially different one is the wire's truth (an
+	// out-of-band re-wire), which Read may drift.
 	data.InstanceID = types.StringValue(instanceID)
 	data.ID = types.StringValue(instanceID)
 	data.PocketIDInstanceID = types.StringValue(pinWireIdentity(wiring.PocketIDInstanceID, priorPocketID))

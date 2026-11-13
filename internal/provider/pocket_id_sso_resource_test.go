@@ -382,17 +382,20 @@ func TestPocketIdSsoReadMaterialEchoDriftsState(t *testing.T) {
 	}
 }
 
-// The wire's instance_id echo never moves the resource identity: the
-// GET was made BY the state's key, so a materially different echo is
-// ignored — adopting it would let a later destroy disconnect another
-// instance's wiring.
-func TestPocketIdSsoReadIgnoresInstanceEcho(t *testing.T) {
+// A response carrying a FULL other-instance wiring (instance id,
+// PocketID id, client id, secret id, wired_at) is a platform contract
+// violation: Read must not map ANY field. The prior state stays intact
+// (so no replacement plan) and the refresh fails loudly.
+func TestPocketIdSsoReadRejectsOtherInstanceWiring(t *testing.T) {
 	ctx := context.Background()
 	r, sch := newSchemadPocketIdSso(ctx, t)
 
 	f := newFakeAPI(t)
-	hostile := strings.ReplaceAll(pocketIDWiringDoc, `"instance_id": "inst-1"`, `"instance_id": "inst-other"`)
-	f.pocketIDWiringGets = []scriptedResponse{script(200, hostile)}
+	other := `{"data": {"id": "wiring-row-2", "type": "pocket_id_wiring", "attributes": {
+		"instance_id": "inst-other", "pocket_id_instance_id": "pid-2",
+		"pocket_id_client_id": "client-other", "pocket_id_secret_id": "secret-other",
+		"wired_at": "2026-11-13T10:00:00Z"}}}`
+	f.pocketIDWiringGets = []scriptedResponse{script(200, other)}
 	r.pd = f.testClient()
 
 	stateData := seededPocketIdSso()
@@ -403,18 +406,43 @@ func TestPocketIdSsoReadIgnoresInstanceEcho(t *testing.T) {
 		State: tfsdk.State{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &stateData)},
 	}
 	r.Read(ctx, req, resp)
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("Read: %v", resp.Diagnostics)
-	}
 
+	assertError(t, &resp.Diagnostics, "another instance's wiring", "refusing to refresh", "platform contract violation")
 	findOne(t, f.all(), http.MethodGet, "/api/v1/instances/inst-1/pocket-id-wiring")
+
 	got := rawToPocketIdSso(ctx, t, sch, resp.State.Raw)
 	if got.ID.ValueString() != "inst-1" || got.InstanceID.ValueString() != "inst-1" {
-		t.Errorf("id/instance_id = %s/%s, want the lookup key kept (the wire echo is ignored)",
+		t.Errorf("id/instance_id = %s/%s, want the prior state unchanged",
 			got.ID.ValueString(), got.InstanceID.ValueString())
 	}
 	if got.PocketIDInstanceID.ValueString() != "pid-1" {
-		t.Errorf("pocket_id_instance_id = %q, want the wire's pid-1", got.PocketIDInstanceID.ValueString())
+		t.Errorf("pocket_id_instance_id = %q, want the prior pid-1 (no field mapped)", got.PocketIDInstanceID.ValueString())
+	}
+	if got.PocketIDClientID.ValueString() != "client-1" || got.PocketIDSecretID.ValueString() != "secret-1" {
+		t.Errorf("client/secret ids = %s/%s, want the prior state (no field mapped)",
+			got.PocketIDClientID.ValueString(), got.PocketIDSecretID.ValueString())
+	}
+	if got.WiredAt.ValueString() != "2026-11-12T10:00:00Z" {
+		t.Errorf("wired_at = %q, want the prior state (no field mapped)", got.WiredAt.ValueString())
+	}
+
+	// The unchanged state plans no replacement.
+	for _, name := range []string{"instance_id", "pocket_id_instance_id"} {
+		planValue := got.InstanceID
+		if name == "pocket_id_instance_id" {
+			planValue = got.PocketIDInstanceID
+		}
+		planResp := &planmodifier.StringResponse{PlanValue: planValue}
+		sch.Attributes[name].(schema.StringAttribute).PlanModifiers[0].PlanModifyString(ctx, planmodifier.StringRequest{
+			Path:       path.Root(name),
+			PlanValue:  planValue,
+			StateValue: planValue,
+			State:      tfsdk.State{Schema: sch, Raw: resp.State.Raw},
+			Plan:       tfsdk.Plan{Schema: sch, Raw: resp.State.Raw},
+		}, planResp)
+		if planResp.RequiresReplace {
+			t.Errorf("%s: the refused refresh must not plan a replacement", name)
+		}
 	}
 }
 
