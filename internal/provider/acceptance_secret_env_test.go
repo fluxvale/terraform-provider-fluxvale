@@ -26,9 +26,11 @@ import (
 // and watch it disappear.
 //
 // The running-app proof is Vikunja's /api/v1/info, whose
-// auth.local.registration_enabled is env-derived and not persisted.
-// No cluster credentials are needed, so the nightly acceptance lane
-// proves rotation and removal too.
+// link_sharing_enabled and caldav_enabled are env-derived and not
+// persisted. Both start non-default, the rotation flips one, and the
+// removal returns the other to its default — so each step has a
+// distinct running-app observation. No cluster credentials are needed,
+// so the nightly acceptance lane proves rotation and removal too.
 //
 // Values travel as sensitive variables, never config literals, and
 // every assertion reports key names or counts only — a leaked value in
@@ -38,10 +40,11 @@ func TestAccInstanceSecretEnv(t *testing.T) {
 		t.Skip("TF_ACC not set — the acceptance lane runs nightly/tags/dispatch, never per-PR (wallet cost)")
 	}
 	const (
-		address = "fluxvale_instance.secret"
-		regKey  = "VIKUNJA_SERVICE_ENABLEREGISTRATION"
-		regOn   = "true"
-		regOff  = "false"
+		address   = "fluxvale_instance.secret"
+		linkKey   = "VIKUNJA_SERVICE_ENABLELINKSHARING"
+		caldavKey = "VIKUNJA_SERVICE_ENABLECALDAV"
+		on        = "true"
+		off       = "false"
 	)
 	secretValueOne := accRandomSecret(t)
 	secretValueTwo := accRandomSecret(t)
@@ -68,17 +71,18 @@ func TestAccInstanceSecretEnv(t *testing.T) {
 		CheckDestroy:             accInstancesGone(t),
 		Steps: []resource.TestStep{
 			{
-				Config:          accSecretEnvConfig(true, accSecretBlock(regOn, 1)),
+				Config:          accSecretEnvConfig(true, accSecretBlock(off, off, 1)),
 				ConfigVariables: accSecretVars(t, secretValueOne),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(address, "status", "running"),
-					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.#", "2"),
+					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.#", "3"),
 					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.0", "ACC_SECRET"),
-					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.1", regKey),
+					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.1", caldavKey),
+					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.2", linkKey),
 					resource.TestCheckNoResourceAttr(address, "secret_env_vars.ACC_SECRET"),
 					checkID,
 					accStateHasNoSecret(t, address, secretValueOne),
-					accRunningRegistrationIs(t, address, true),
+					accRunningFlagsIs(t, address, false, false),
 				),
 			},
 			{
@@ -86,21 +90,21 @@ func TestAccInstanceSecretEnv(t *testing.T) {
 				// platform's rolling restart cannot surge. Stop first,
 				// rotate (the env PATCH writes the Secret while
 				// stopped), then start onto the new environment.
-				Config:          accSecretEnvConfig(false, accSecretBlock(regOff, 2)),
+				Config:          accSecretEnvConfig(false, accSecretBlock(on, off, 2)),
 				ConfigVariables: accSecretVars(t, secretValueTwo),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(address, "status", "stopped"),
-					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.#", "2"),
+					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.#", "3"),
 					accStateHasNoSecret(t, address, secretValueOne),
 					accStateHasNoSecret(t, address, secretValueTwo),
 					checkID,
 				),
 			},
 			{
-				Config:          accSecretEnvConfig(true, accSecretBlock(regOff, 2)),
+				Config:          accSecretEnvConfig(true, accSecretBlock(on, off, 2)),
 				ConfigVariables: accSecretVars(t, secretValueTwo),
 				Check: resource.ComposeTestCheckFunc(
-					accRunningRegistrationIs(t, address, false),
+					accRunningFlagsIs(t, address, true, false),
 					accWaitStatus(t, address, "running"),
 					checkID,
 				),
@@ -120,7 +124,7 @@ func TestAccInstanceSecretEnv(t *testing.T) {
 				Config:          accSecretEnvConfig(true, "  secret_env_vars = {}\n  secret_env_vars_version = 3"),
 				ConfigVariables: accSecretVars(t, secretValueTwo),
 				Check: resource.ComposeTestCheckFunc(
-					accRunningRegistrationIs(t, address, true),
+					accRunningFlagsIs(t, address, true, true),
 					accWaitStatus(t, address, "running"),
 					checkID,
 				),
@@ -130,14 +134,15 @@ func TestAccInstanceSecretEnv(t *testing.T) {
 }
 
 // The values here are deliberately not secret: the state-grep proof
-// uses ACC_SECRET (random per run); registration is the running app's
-// observable signal and is not persisted by Vikunja.
-func accSecretBlock(registration string, version int) string {
+// uses ACC_SECRET (random per run); the two Vikunja flags are the
+// running app's observable signals and are not persisted.
+func accSecretBlock(linkSharing, caldav string, version int) string {
 	return fmt.Sprintf(`  secret_env_vars = {
-    ACC_SECRET                         = var.secret_value
-    VIKUNJA_SERVICE_ENABLEREGISTRATION = %q
+    ACC_SECRET                          = var.secret_value
+    VIKUNJA_SERVICE_ENABLELINKSHARING   = %q
+    VIKUNJA_SERVICE_ENABLECALDAV        = %q
   }
-  secret_env_vars_version = %d`, registration, version)
+  secret_env_vars_version = %d`, linkSharing, caldav, version)
 }
 
 func accSecretEnvConfig(running bool, secretBlock string) string {
@@ -247,11 +252,11 @@ func accWaitStatus(t *testing.T, address, want string) resource.TestCheckFunc {
 	}
 }
 
-// accRunningRegistrationIs is the running-app proof: Vikunja reports
-// auth.local.registration_enabled on the public /api/v1/info route,
-// directly from its env. Polling covers the start/deploy window
-// without cluster access.
-func accRunningRegistrationIs(t *testing.T, address string, want bool) resource.TestCheckFunc {
+// accRunningFlagsIs is the running-app proof: Vikunja reports
+// link_sharing_enabled and caldav_enabled on the public /api/v1/info
+// route, directly from its env. A 200 with both fields present is
+// required — a JSON error body must not decode into a false pass.
+func accRunningFlagsIs(t *testing.T, address string, wantLink, wantCaldav bool) resource.TestCheckFunc {
 	t.Helper()
 	return func(s *terraform.State) error {
 		rs, ok := s.RootModule().Resources[address]
@@ -265,30 +270,28 @@ func accRunningRegistrationIs(t *testing.T, address string, want bool) resource.
 		url := "https://" + slug + ".fluxvale.app/api/v1/info"
 		client := &http.Client{Timeout: 10 * time.Second}
 		deadline := time.Now().Add(5 * time.Minute)
-		last := false
+		last := "unreachable"
 		for time.Now().Before(deadline) {
 			resp, err := client.Get(url)
 			if err == nil {
 				var body struct {
-					Auth struct {
-						Local struct {
-							RegistrationEnabled bool `json:"registration_enabled"`
-						} `json:"local"`
-					} `json:"auth"`
+					LinkSharingEnabled *bool `json:"link_sharing_enabled"`
+					CaldavEnabled      *bool `json:"caldav_enabled"`
 				}
 				decErr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body)
 				resp.Body.Close()
-				if decErr == nil {
-					last = body.Auth.Local.RegistrationEnabled
-					if last == want {
-						t.Logf("running_env=VIKUNJA_SERVICE_ENABLEREGISTRATION matches the applied version")
+				if resp.StatusCode == http.StatusOK && decErr == nil &&
+					body.LinkSharingEnabled != nil && body.CaldavEnabled != nil {
+					last = fmt.Sprintf("link=%t caldav=%t", *body.LinkSharingEnabled, *body.CaldavEnabled)
+					if *body.LinkSharingEnabled == wantLink && *body.CaldavEnabled == wantCaldav {
+						t.Logf("running_env=VIKUNJA_SERVICE_ENABLE* matches the applied version")
 						return nil
 					}
 				}
 			}
 			time.Sleep(5 * time.Second)
 		}
-		return fmt.Errorf("running app did not report the applied registration setting (last %t, want %t)", last, want)
+		return fmt.Errorf("running app did not report the applied flags (last %s, want link=%t caldav=%t)", last, wantLink, wantCaldav)
 	}
 }
 

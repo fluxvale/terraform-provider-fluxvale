@@ -1219,11 +1219,11 @@ func wantEnvPatch(t *testing.T, r smokeReq, wantSet map[string]string, wantRemov
 		t.Fatalf("%s %s: set = %#v, want an object", r.method, r.path, attrs["set"])
 	}
 	if len(set) != len(wantSet) {
-		t.Errorf("%s %s: set = %v, want %v", r.method, r.path, set, wantSet)
+		t.Errorf("%s %s: set keys = %v, want %v", r.method, r.path, keysOfAnyAny(set), sortedKeys(wantSet))
 	}
 	for key, want := range wantSet {
 		if got, _ := set[key].(string); got != want {
-			t.Errorf("%s %s: set[%q] = %#v, want %q", r.method, r.path, key, set[key], want)
+			t.Errorf("%s %s: set[%q] carries the wrong value", r.method, r.path, key)
 		}
 	}
 	rawRemove, ok := attrs["remove"].([]any)

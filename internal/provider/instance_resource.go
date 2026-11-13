@@ -150,16 +150,18 @@ func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				MarkdownDescription: "Secret environment variables for the deploy, merged into the same in-place env PATCH " +
 					"as `env_vars`. Terraform never writes values to state or plan files — the API never echoes them either — " +
 					"so this is the strongest input the provider can offer. Because a write-only value cannot produce a plan " +
-					"diff, `secret_env_vars_version` is the rotation signal: bump it whenever a value changes, and every key " +
-					"in the map is re-sent. A key present in both `env_vars` and `secret_env_vars` is a plan-time error. " +
-					"Requires Terraform 1.12+ or OpenTofu 1.13+.",
+					"diff, `secret_env_vars_version` is the rotation signal: bump it on every value or key-set change (add, " +
+					"remove, or a move between the two maps), and every key in the map is re-sent. A key-set change without " +
+					"a bump is refused. A key present in both `env_vars` and `secret_env_vars` is a plan-time error. " +
+					"Requires Terraform 1.12+ or OpenTofu 1.13+, in a provider release containing #764 (0.4.0 or later).",
 			},
 			"secret_env_vars_version": schema.Int64Attribute{
 				Optional: true,
 				MarkdownDescription: "Rotation signal for `secret_env_vars` — required whenever the map is set, and must be " +
-					"greater than 0. Bump it to send the current secret values again. Removal is drop-key-plus-bump: remove " +
-					"the key from `secret_env_vars` and bump this integer; removing every key may instead drop both " +
-					"attributes (or set the map to `{}` and bump). With no secrets, leave both unset.",
+					"greater than 0. Bump it to send the current secret values again. Bump on every key-set change too: " +
+					"dropping a key, adding one, or moving one between the two maps. Removal is drop-key-plus-bump; removing " +
+					"every key may instead drop both attributes (or set the map to `{}` and bump). With no secrets, leave " +
+					"both unset.",
 			},
 			"secret_env_vars_keys": schema.ListAttribute{
 				ElementType: types.StringType,
@@ -167,7 +169,8 @@ func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				MarkdownDescription: "Sorted keys this resource manages through `secret_env_vars` — never values. The provider " +
 					"records the list on apply so reviewers can see which names are managed, and diffs it against the prior " +
 					"list to remove dropped keys (the drop-key-plus-bump protocol). `null` after import: the API cannot tell " +
-					"the provider which env keys were secret.",
+					"the provider which env keys were secret, so pre-existing secret keys stay untracked until the first " +
+					"apply that names them in `secret_env_vars`.",
 			},
 			"running": schema.BoolAttribute{
 				Optional:    true,
