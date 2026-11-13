@@ -207,7 +207,8 @@ func TestPocketIdSsoCreateRejectsHostileEcho(t *testing.T) {
 			}
 			r.Create(ctx, req, resp)
 
-			assertError(t, &resp.Diagnostics, tc.needle, "Nothing was written to state")
+			assertError(t, &resp.Diagnostics, tc.needle,
+				"may already have left a live wiring/client", "disconnect it there", "retry could mint another client")
 			if !resp.State.Raw.IsNull() {
 				t.Errorf("state = %v, want null (a hostile echo must not half-write state)", resp.State.Raw)
 			}
@@ -355,8 +356,7 @@ func TestPocketIdSsoReadMaterialEchoDriftsState(t *testing.T) {
 	r, sch := newSchemadPocketIdSso(ctx, t)
 
 	f := newFakeAPI(t)
-	drifted := strings.ReplaceAll(pocketIDWiringDoc, `"instance_id": "inst-1"`, `"instance_id": "inst-other"`)
-	drifted = strings.ReplaceAll(drifted, `"pocket_id_instance_id": "pid-1"`, `"pocket_id_instance_id": "pid-other"`)
+	drifted := strings.ReplaceAll(pocketIDWiringDoc, `"pocket_id_instance_id": "pid-1"`, `"pocket_id_instance_id": "pid-other"`)
 	f.pocketIDWiringGets = []scriptedResponse{script(200, drifted)}
 	r.pd = f.testClient()
 
@@ -373,12 +373,48 @@ func TestPocketIdSsoReadMaterialEchoDriftsState(t *testing.T) {
 	}
 
 	got := rawToPocketIdSso(ctx, t, sch, resp.State.Raw)
-	if got.InstanceID.ValueString() != "inst-other" || got.ID.ValueString() != "inst-other" {
-		t.Errorf("id/instance_id = %s/%s, want the wire's materially different identity",
+	if got.ID.ValueString() != "inst-1" || got.InstanceID.ValueString() != "inst-1" {
+		t.Errorf("id/instance_id = %s/%s, want the lookup key unconditionally",
 			got.ID.ValueString(), got.InstanceID.ValueString())
 	}
 	if got.PocketIDInstanceID.ValueString() != "pid-other" {
 		t.Errorf("pocket_id_instance_id = %q, want the wire's materially different identity", got.PocketIDInstanceID.ValueString())
+	}
+}
+
+// The wire's instance_id echo never moves the resource identity: the
+// GET was made BY the state's key, so a materially different echo is
+// ignored — adopting it would let a later destroy disconnect another
+// instance's wiring.
+func TestPocketIdSsoReadIgnoresInstanceEcho(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadPocketIdSso(ctx, t)
+
+	f := newFakeAPI(t)
+	hostile := strings.ReplaceAll(pocketIDWiringDoc, `"instance_id": "inst-1"`, `"instance_id": "inst-other"`)
+	f.pocketIDWiringGets = []scriptedResponse{script(200, hostile)}
+	r.pd = f.testClient()
+
+	stateData := seededPocketIdSso()
+	req := resource.ReadRequest{
+		State: tfsdk.State{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &stateData)},
+	}
+	resp := &resource.ReadResponse{
+		State: tfsdk.State{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &stateData)},
+	}
+	r.Read(ctx, req, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read: %v", resp.Diagnostics)
+	}
+
+	findOne(t, f.all(), http.MethodGet, "/api/v1/instances/inst-1/pocket-id-wiring")
+	got := rawToPocketIdSso(ctx, t, sch, resp.State.Raw)
+	if got.ID.ValueString() != "inst-1" || got.InstanceID.ValueString() != "inst-1" {
+		t.Errorf("id/instance_id = %s/%s, want the lookup key kept (the wire echo is ignored)",
+			got.ID.ValueString(), got.InstanceID.ValueString())
+	}
+	if got.PocketIDInstanceID.ValueString() != "pid-1" {
+		t.Errorf("pocket_id_instance_id = %q, want the wire's pid-1", got.PocketIDInstanceID.ValueString())
 	}
 }
 
@@ -411,7 +447,8 @@ func TestPocketIdSsoReadGuardsEmptyKey(t *testing.T) {
 			}
 			r.Read(ctx, req, resp)
 
-			assertError(t, &resp.Diagnostics, "Invalid PocketID SSO state", "instance_id", "empty key")
+			assertError(t, &resp.Diagnostics, "Invalid PocketID SSO state", "instance_id", "empty key",
+				"Refresh cannot repair", "terraform state rm", "re-create")
 			if reqs := f.all(); len(reqs) != 0 {
 				t.Errorf("requests = %+v, want none — an empty lookup key must not reach the wire", reqs)
 			}
@@ -627,6 +664,47 @@ func TestPocketIdSsoUpdatePinsPocketIDInstanceEcho(t *testing.T) {
 	}
 	if got.PocketIDSecretID.ValueString() != "secret-2" {
 		t.Errorf("pocket_id_secret_id = %q, want the rotate's secret-2", got.PocketIDSecretID.ValueString())
+	}
+}
+
+// A null/unknown plan identity is unreachable in a valid in-place
+// update (RequiresReplace forces replacement), but a defensive
+// fallback must carry the state's value rather than pin "" into state.
+func TestPocketIdSsoUpdateUnknownPlanPocketIDFallsBackToState(t *testing.T) {
+	cases := []struct {
+		name  string
+		value types.String
+	}{
+		{"unknown", types.StringUnknown()},
+		{"null", types.StringNull()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, sch := newSchemadPocketIdSso(ctx, t)
+
+			f := newFakeAPI(t)
+			r.pd = f.testClient()
+
+			stateData := seededPocketIdSso(func(d *pocketIdSsoModel) { d.RotateSecretOn = types.StringValue("v1") })
+			planData := seededPocketIdSso(func(d *pocketIdSsoModel) {
+				d.RotateSecretOn = types.StringValue("v2")
+				d.PocketIDInstanceID = tc.value
+			})
+			resp := runPocketIdSsoUpdate(t, r, sch, planData, stateData)
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("Update: %v", resp.Diagnostics)
+			}
+
+			got := rawToPocketIdSso(ctx, t, sch, resp.State.Raw)
+			if got.PocketIDInstanceID.ValueString() != "pid-1" {
+				t.Errorf("pocket_id_instance_id = %q, want the state's pid-1 fallback (never \"\")",
+					got.PocketIDInstanceID.ValueString())
+			}
+			if got.PocketIDSecretID.ValueString() != "secret-2" {
+				t.Errorf("pocket_id_secret_id = %q, want the rotate's secret-2", got.PocketIDSecretID.ValueString())
+			}
+		})
 	}
 }
 

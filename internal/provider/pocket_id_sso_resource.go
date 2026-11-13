@@ -167,16 +167,18 @@ func (r *pocketIdSsoResource) Create(ctx context.Context, req resource.CreateReq
 	if !strings.EqualFold(wiring.InstanceID, planInstanceID) {
 		resp.Diagnostics.AddError(
 			"The platform wired a different instance",
-			fmt.Sprintf("connect answered for instance %q, but this resource asked for %q. Nothing was written to state — "+
-				"refresh and inspect the platform's wiring before applying again.", wiring.InstanceID, planInstanceID),
+			fmt.Sprintf("connect answered for instance %q, but this resource asked for %q. Terraform wrote no state, but the 201 may "+
+				"already have left a live wiring/client on the platform — inspect it and disconnect it there before retrying "+
+				"(a retry could mint another client).", wiring.InstanceID, planInstanceID),
 		)
 		return
 	}
 	if !strings.EqualFold(wiring.PocketIDInstanceID, planPocketID) {
 		resp.Diagnostics.AddError(
 			"The platform wired a different PocketID instance",
-			fmt.Sprintf("connect answered with PocketID instance %q, but this resource asked for %q. Nothing was written to state — "+
-				"refresh and inspect the platform's wiring before applying again.", wiring.PocketIDInstanceID, planPocketID),
+			fmt.Sprintf("connect answered with PocketID instance %q, but this resource asked for %q. Terraform wrote no state, but the 201 may "+
+				"already have left a live wiring/client on the platform — inspect it and disconnect it there before retrying "+
+				"(a retry could mint another client).", wiring.PocketIDInstanceID, planPocketID),
 		)
 		return
 	}
@@ -199,7 +201,8 @@ func readPocketIdSso(ctx context.Context, pd *providerData, data *pocketIdSsoMod
 		diags.AddError(
 			"Invalid PocketID SSO state",
 			"The state's \"instance_id\" is null, unknown, or empty — refusing to read the wiring by an empty key "+
-				"(a 404 would remove a live wiring from state). Refresh the resource or import it again.",
+				"(a 404 would remove a live wiring from state). Refresh cannot repair a corrupt key: remove the resource "+
+				"from state (for example, `terraform state rm <address>`) and re-create it.",
 		)
 		return false
 	}
@@ -215,13 +218,15 @@ func readPocketIdSso(ctx context.Context, pd *providerData, data *pocketIdSsoMod
 		return false
 	}
 	mapPocketIdSso(data, wiring)
-	// A case-fold echo names the same UUID: keep the configured/state
-	// spelling so a lowercase-normalized echo never plans a replacement.
-	// A materially different echo is the wire's truth — an out-of-band
-	// re-wire — and Read is allowed to drift state there.
-	data.InstanceID = types.StringValue(pinWireIdentity(wiring.InstanceID, instanceID))
+	// The GET was made BY the state's instance id: that lookup key wins
+	// unconditionally, and a differing echo is ignored (it must never
+	// move the resource identity — a replacement would then disconnect
+	// the wrong instance). A case-fold pocket_id_instance_id echo keeps
+	// the state spelling; a materially different one is the wire's truth
+	// (an out-of-band re-wire), which Read may drift.
+	data.InstanceID = types.StringValue(instanceID)
+	data.ID = types.StringValue(instanceID)
 	data.PocketIDInstanceID = types.StringValue(pinWireIdentity(wiring.PocketIDInstanceID, priorPocketID))
-	data.ID = data.InstanceID
 	return false
 }
 
@@ -296,6 +301,13 @@ func (r *pocketIdSsoResource) Update(ctx context.Context, req resource.UpdateReq
 	// framework's inconsistent-result check.
 	instanceID := state.InstanceID.ValueString()
 	planPocketID := plan.PocketIDInstanceID.ValueString()
+	if plan.PocketIDInstanceID.IsNull() || plan.PocketIDInstanceID.IsUnknown() {
+		// Defensive: a valid in-place update cannot reach here with a
+		// null/unknown identity (RequiresReplace would have forced a
+		// replacement), but pinning an empty string into state would
+		// corrupt the next plan.
+		planPocketID = state.PocketIDInstanceID.ValueString()
+	}
 	plan.InstanceID = types.StringValue(instanceID)
 
 	if !plan.RotateSecretOn.Equal(state.RotateSecretOn) {
