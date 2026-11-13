@@ -24,6 +24,16 @@ lives next door in
   semver-newest-first (#700), but a pin preconditions against the
   catalog at plan and survives re-ordering — no "first row" shortcut
   in code, on purpose).
+- **Encrypted state and plan** — the root module declares OpenTofu's
+  `encryption` block with `enforced = true`, keyed by
+  `TF_VAR_state_passphrase` from the keychain or a secret manager.
+  This stack needs OpenTofu 1.13+; Terraform has no native equivalent
+  (see the provider's [Secrets in Terraform](https://github.com/fluxvale/terraform-provider-fluxvale/blob/main/docs/guides/secrets.md)
+  guide for the marker fallback).
+- **Write-only secrets** — `instances.<name>.secret_env_vars` plus
+  `secret_env_vars_version` ride the same in-place env PATCH as
+  `env_vars`, but their values never enter state or plan files. Bump
+  the version to rotate; drop a key and bump to remove.
 - **1 backups row per instance** — endpoint composed from the
   Cloudflare account id, bucket from the TF-created bucket, per
   instance prefix and retention.
@@ -48,6 +58,7 @@ instance.
 | Value | Where it comes from | Goes where |
 | --- | --- | --- |
 | `FLUXVALE_PAT` | fluxvale.com → Settings → Developer → API tokens (scopes: `instances:write backups:write gateways:write catalog:read`) | `export FLUXVALE_PAT=fvpat_…` — **only** the environment, never a file, never pasted into the repo or notes |
+| `state_passphrase` | your keychain or secret manager — a long passphrase (16+ chars) for state/plan encryption | `export TF_VAR_state_passphrase=…` — never in `terraform.tfvars`, never in git |
 | `cloudflare_api_token` | Cloudflare dashboard → API tokens (R2 edit on the account) | `terraform.tfvars` |
 | `cloudflare_account_id` | Cloudflare dashboard → account overview | `terraform.tfvars` |
 | `r2_access_key_id` / `r2_secret_access_key` | Cloudflare dashboard → R2 → Manage API Tokens (object read/write) | `terraform.tfvars` |
@@ -87,12 +98,65 @@ zip + the versioned `*_SHA256SUMS` (+ `*_SHA256SUMS.sig`), verify, drop
 the zip into `~/.tfplugins-mirror`, point `~/.tofurc` at it — §1–3
 walks it.
 
+## Secrets and encryption
+
+The module demonstrates the provider's write-only input. Put a secret in
+`secret_env_vars`, set `secret_env_vars_version = 1`, and keep the value
+in a sensitive variable or your CI secret store:
+
+```hcl
+instances = {
+  # …the other rows…
+  umami = {
+    app                    = "umami"
+    version                = "3.4.1-bundled"
+    # …allocation and posture…
+    secret_env_vars         = { APP_SECRET = "…" }
+    secret_env_vars_version = 1
+  }
+}
+```
+
+The value never appears in `terraform.tfstate` or the saved plan. Prove
+it after an apply:
+
+```sh
+grep -c 'the-secret-value' terraform.tfstate
+# 0
+```
+
+**Rotate** by changing the value and bumping
+`secret_env_vars_version = 2`; the provider re-sends every secret key
+and the running instance rolls. If the app's quota cannot fit a second
+pod during that rollout, stop it first (`running = false`), apply the
+bump, then start it again (`running = true`). **Remove** a key by
+deleting it from the map and bumping again. Removing the last key may drop both attributes
+or keep `secret_env_vars = {}` with a final bump. A key present in both
+`env_vars` and `secret_env_vars` is a plan-time error. The computed
+`secret_env_vars_keys` list shows what is managed without showing values.
+
+The root module enforces OpenTofu state and plan encryption. Retrieve a
+passphrase from the keychain (never write it to `terraform.tfvars`):
+
+```sh
+export TF_VAR_state_passphrase="$(security find-generic-password -w -s fluxvale-state)"
+# Linux: secret-tool lookup service fluxvale-state
+# 1Password: op read 'op://Private/fluxvale-state/passphrase'
+```
+
+`enforced = true` means a missing passphrase refuses the run; it never
+silently writes plaintext. Existing unencrypted state needs the one-time
+`unencrypted` fallback migration in the provider's
+[Secrets in Terraform](https://github.com/fluxvale/terraform-provider-fluxvale/blob/main/docs/guides/secrets.md)
+guide. Losing the passphrase makes the state unrecoverable — back it up.
+
 ## Run and verify
 
 ```sh
 cd examples/owner-stack
 cp terraform.tfvars.example terraform.tfvars   # then fill it in
 export FLUXVALE_PAT=fvpat_…                    # never in a file
+export TF_VAR_state_passphrase=…               # from the keychain/secret manager
 tofu init                                      # registry defaults (fluxvale + cloudflare); mirror optional
 tofu plan
 tofu apply
@@ -116,6 +180,9 @@ Verified when:
   in-place churn on registered custom-domain rows.
 - `tofu apply` completes; `tofu output` prints the public URLs and
   the gateway host.
+- `grep -c '<the-secret>' terraform.tfstate` prints `0`; the state file
+  starts with OpenTofu's encryption metadata, and the plan file is
+  encrypted too.
 - The panel shows the instances running, backups rows enabled, and
   the Access tab shows the gateway active with the private instances
   attached.

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -178,14 +179,21 @@ data "fluxvale_instance" "b_by_id" {
   id = fluxvale_instance.b.id
 }
 `
-	writeModule := func(envLine string) {
+	writeModule := func(envBlock string) {
 		t.Helper()
-		module := fmt.Sprintf(moduleTemplate, fake.URL, envLine)
+		module := fmt.Sprintf(moduleTemplate, fake.URL, envBlock)
 		if err := os.WriteFile(filepath.Join(work, "main.tf"), []byte(module), 0o600); err != nil {
 			t.Fatalf("write module: %v", err)
 		}
 	}
-	writeModule(`  env_vars    = { SMOKE = "1", DROP = "bye" }`)
+	const (
+		secretOne = "e2e-secret-one-764"
+		secretTwo = "e2e-secret-two-764"
+	)
+	secretBlock := func(value string, version int) string {
+		return fmt.Sprintf("  secret_env_vars = { SECRET = %q }\n  secret_env_vars_version = %d", value, version)
+	}
+	writeModule("  env_vars    = { SMOKE = \"1\", DROP = \"bye\" }\n" + secretBlock(secretOne, 1))
 
 	runTofu := func(cliConfig string, args ...string) string {
 		t.Helper()
@@ -245,6 +253,81 @@ data "fluxvale_instance" "b_by_id" {
 		t.Fatalf("fluxvale_instance.b is not in state")
 		return ""
 	}
+	// stateRaw is the literal terraform.tfstate the write-only proof
+	// greps — the same bytes `grep -c` reads.
+	stateRaw := func() []byte {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(work, "terraform.tfstate"))
+		if err != nil {
+			t.Fatalf("read terraform state: %v", err)
+		}
+		return raw
+	}
+	// instanceAttrs returns the named instance's state attributes, for
+	// the computed secret key list.
+	instanceAttrs := func(name string) map[string]any {
+		t.Helper()
+		var st struct {
+			Resources []struct {
+				Type, Name string
+				Instances  []struct {
+					Attributes map[string]any `json:"attributes"`
+				} `json:"instances"`
+			} `json:"resources"`
+		}
+		if err := json.Unmarshal(stateRaw(), &st); err != nil {
+			t.Fatalf("decode terraform state: %v", err)
+		}
+		for _, res := range st.Resources {
+			if res.Type == "fluxvale_instance" && res.Name == name && len(res.Instances) > 0 {
+				return res.Instances[0].Attributes
+			}
+		}
+		t.Fatalf("fluxvale_instance.%s is not in state", name)
+		return nil
+	}
+	// assertSecretNotInState is the issue's own check: the secret value
+	// appears zero times in terraform.tfstate. Only the count is
+	// printed.
+	assertSecretNotInState := func(value string) {
+		t.Helper()
+		count := bytes.Count(stateRaw(), []byte(value))
+		t.Logf("grep -c secret terraform.tfstate = %d", count)
+		if count != 0 {
+			t.Fatalf("secret value appears %d time(s) in terraform.tfstate — write-only leaked", count)
+		}
+	}
+	assertSecretKeys := func(want ...string) {
+		t.Helper()
+		raw, ok := instanceAttrs("b")["secret_env_vars_keys"].([]any)
+		if !ok && len(want) > 0 {
+			t.Fatalf("secret_env_vars_keys = %#v, want %v", instanceAttrs("b")["secret_env_vars_keys"], want)
+		}
+		got := make([]string, 0, len(raw))
+		for _, v := range raw {
+			got = append(got, fmt.Sprint(v))
+		}
+		if len(got) != len(want) {
+			t.Fatalf("secret_env_vars_keys = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("secret_env_vars_keys = %v, want %v", got, want)
+			}
+		}
+	}
+	// A clean plan is exit 0 with -detailed-exitcode; exit 2 (changes)
+	// or 1 (error) fails the gate.
+	assertCleanPlan := func(stage string) {
+		t.Helper()
+		out := runTofu(clipath, "plan", "-detailed-exitcode")
+		t.Logf("clean plan after %s: %s", stage, strings.SplitN(strings.TrimSpace(out), "\n", 2)[0])
+	}
+
+	assertCleanPlan("create")
+	assertSecretNotInState(secretOne)
+	assertSecretKeys("SECRET")
+
 	// dataSourceAttrs returns a fluxvale_instance data source's state
 	// attributes — the real-tofu proof of the lookup forms.
 	dataSourceAttrs := func(name string) map[string]any {
@@ -306,19 +389,30 @@ data "fluxvale_instance" "b_by_id" {
 			byID["slug"], bySlug["slug"])
 	}
 
-	// Change SMOKE, add ADDED, remove DROP — one in-place merge PATCH.
-	writeModule(`  env_vars    = { SMOKE = "2", ADDED = "yes" }`)
+	// Change SMOKE, add ADDED, remove DROP, and rotate the secret by
+	// bumping the version — one in-place merge PATCH re-sends every
+	// secret key.
+	writeModule("  env_vars    = { SMOKE = \"2\", ADDED = \"yes\" }\n" + secretBlock(secretTwo, 2))
 	assertEnvPlan(runTofu(clipath, "plan", "-out=tfplan"))
 	runTofu(clipath, "apply", "tfplan")
+	assertCleanPlan("rotation")
+	assertSecretNotInState(secretOne)
+	assertSecretNotInState(secretTwo)
+	assertSecretKeys("SECRET")
 	if id := instanceBID(); id != idBefore {
 		t.Fatalf("instance b id changed across an env update: %q -> %q", idBefore, id)
 	}
 
-	// Omit env_vars entirely: a null plan clears the remaining keys.
-	writeModule("")
+	// Drop the secret key (empty map + bump) and omit env_vars entirely:
+	// one PATCH removes both the secret and the remaining env keys.
+	writeModule("  secret_env_vars = {}\n  secret_env_vars_version = 3")
 	clearPlan := runTofu(clipath, "plan", "-out=tfplan")
 	assertEnvPlan(clearPlan)
 	runTofu(clipath, "apply", "tfplan")
+	assertCleanPlan("removal")
+	assertSecretNotInState(secretOne)
+	assertSecretNotInState(secretTwo)
+	assertSecretKeys()
 	if id := instanceBID(); id != idBefore {
 		t.Fatalf("instance b id changed across an env clear: %q -> %q", idBefore, id)
 	}
@@ -355,8 +449,8 @@ data "fluxvale_instance" "b_by_id" {
 	fake.wantCreateAttrs(t, "smoke-b", "cpu_cores", "1", "memory_mb", "512", "storage_gb", "2")
 	fake.wantCreateAttrs(t, "smoke-c", "cpu_cores", "0.5", "memory_mb", "256", "storage_gb", "1")
 	envVars := fattrs(t, fake.createNamed(t, "smoke-b"))["env_vars"]
-	if m, ok := envVars.(map[string]any); !ok || m["SMOKE"] != "1" {
-		t.Fatalf("instance b create env_vars = %#v, want SMOKE=1", envVars)
+	if m, ok := envVars.(map[string]any); !ok || m["SMOKE"] != "1" || m["SECRET"] != secretOne {
+		t.Fatalf("instance b create env_vars = %#v, want SMOKE=1 and the secret merged", envVars)
 	}
 
 	// The exposure PATCH carried the planned value — the private
@@ -379,8 +473,8 @@ data "fluxvale_instance" "b_by_id" {
 	if len(envPatches) != 2 {
 		t.Fatalf("env PATCH count = %d, want 2", len(envPatches))
 	}
-	wantEnvPatch(t, envPatches[0], map[string]string{"SMOKE": "2", "ADDED": "yes"}, []string{"DROP"})
-	wantEnvPatch(t, envPatches[1], map[string]string{}, []string{"ADDED", "SMOKE"})
+	wantEnvPatch(t, envPatches[0], map[string]string{"SMOKE": "2", "ADDED": "yes", "SECRET": secretTwo}, []string{"DROP"})
+	wantEnvPatch(t, envPatches[1], map[string]string{}, []string{"ADDED", "SECRET", "SMOKE"})
 
 	// The attach POST paired the private instance's actual id.
 	fake.wantAttachInstance(t, "smoke-b")

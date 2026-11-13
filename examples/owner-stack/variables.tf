@@ -18,6 +18,12 @@ variable "fluxvale_pat" {
   default     = null
 }
 
+variable "state_passphrase" {
+  description = "Passphrase for this stack's OpenTofu state and plan encryption (min. 16 chars). Export TF_VAR_state_passphrase from the keychain or a secret manager — never put it in terraform.tfvars or git."
+  type        = string
+  sensitive   = true
+}
+
 # ── Cloudflare / R2 ──────────────────────────────────────────────────────
 
 variable "cloudflare_api_token" {
@@ -70,32 +76,43 @@ variable "instances" {
     version: the catalog version to deploy, pinned explicitly — the rows are semver-newest-first now, but a pin survives re-ordering and new releases, which is why it stays explicit. Bumping the pin replaces the instance (create-only identity) and the replacement's teardown deletes the app-data volume — restore from the R2 backups or lose the data.
     retention_keep: days of backups per instance; null is the server's default.
     env_vars: write-only environment for the instance, kept verbatim in state (the API never echoes it). Updates in place through one merge PATCH — a running instance rolls briefly, with no replacement and no app-data volume deletion. A null/omitted map clears the keys this resource managed. The catalog marks some app secrets required — umami's 3.4.1-bundled needs APP_SECRET — without which the app runs but stays broken.
+    secret_env_vars / secret_env_vars_version: write-only secret environment, never in state or plan. The version is required with the map and must be > 0; bump it on every value change, and drop-key-plus-bump to remove. A key may not appear in both env_vars and secret_env_vars.
     domain: registers a fluxvale_custom_domain for the instance when set — the dogfood pairings (forgejo → git.fluxvale.com, umami → analytics.fluxvale.com) are pending the dogfood plan; the null default registers nothing.
   EOT
   type = map(object({
-    app            = string
-    version        = string
-    cpu_cores      = number
-    memory_mb      = number
-    storage_gb     = number
-    exposure       = string
-    always_on      = bool
-    running        = bool
-    retention_keep = optional(number)
-    env_vars       = optional(map(string))
-    domain         = optional(string)
+    app                     = string
+    version                 = string
+    cpu_cores               = number
+    memory_mb               = number
+    storage_gb              = number
+    exposure                = string
+    always_on               = bool
+    running                 = bool
+    retention_keep          = optional(number)
+    env_vars                = optional(map(string))
+    secret_env_vars         = optional(map(string))
+    secret_env_vars_version = optional(number)
+    domain                  = optional(string)
   }))
   # The skeleton's three shapes, pinned to catalog versions at the
   # time of writing — every domain null on purpose: an apply
   # registers no custom domain until the dogfood plan's pairings are
   # filled in (see terraform.tfvars.example).
   default = {
-    forgejo = { app = "forgejo", version = "16.0.5", cpu_cores = 1.0, memory_mb = 2048, storage_gb = 10, exposure = "public", always_on = true, running = true, retention_keep = 14, env_vars = null, domain = null }
-    memos   = { app = "memos", version = "26.11.0", cpu_cores = 0.25, memory_mb = 512, storage_gb = 5, exposure = "private", always_on = false, running = true, retention_keep = null, env_vars = null, domain = null }
-    kavita  = { app = "kavita", version = "0.9.1", cpu_cores = 0.5, memory_mb = 512, storage_gb = 10, exposure = "private", always_on = false, running = true, retention_keep = null, env_vars = null, domain = null }
+    forgejo = { app = "forgejo", version = "16.0.5", cpu_cores = 1.0, memory_mb = 2048, storage_gb = 10, exposure = "public", always_on = true, running = true, retention_keep = 14, env_vars = null, secret_env_vars = null, secret_env_vars_version = null, domain = null }
+    memos   = { app = "memos", version = "26.11.0", cpu_cores = 0.25, memory_mb = 512, storage_gb = 5, exposure = "private", always_on = false, running = true, retention_keep = null, env_vars = null, secret_env_vars = null, secret_env_vars_version = null, domain = null }
+    kavita  = { app = "kavita", version = "0.9.1", cpu_cores = 0.5, memory_mb = 512, storage_gb = 10, exposure = "private", always_on = false, running = true, retention_keep = null, env_vars = null, secret_env_vars = null, secret_env_vars_version = null, domain = null }
   }
   validation {
     condition     = alltrue([for k, v in var.instances : contains(["public", "private"], v.exposure)])
     error_message = "Each instance's exposure must be public or private."
+  }
+  validation {
+    condition = alltrue([
+      for k, v in var.instances :
+      (v.secret_env_vars == null) == (v.secret_env_vars_version == null) &&
+      (v.secret_env_vars_version == null || v.secret_env_vars_version > 0)
+    ])
+    error_message = "secret_env_vars and secret_env_vars_version travel together; the version must be greater than 0."
   }
 }

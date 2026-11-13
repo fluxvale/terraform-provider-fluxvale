@@ -11,6 +11,11 @@ The name, the version identity, and the organization are create-only (the API ha
 ## Example Usage
 
 ```hcl
+variable "smtp_password" {
+  type      = string
+  sensitive = true
+}
+
 data "fluxvale_app_versions" "memos" {
   app = "memos"
 }
@@ -25,6 +30,11 @@ resource "fluxvale_instance" "memos" {
   storage_gb   = 10
   running      = true
   exposure     = "private" # behind the access gateway
+
+  # Write-only: values never enter state or plan files. Bump the
+  # version whenever a value changes; drop a key and bump to remove it.
+  secret_env_vars         = { SMTP_PASSWORD = var.smtp_password }
+  secret_env_vars_version = 1
 }
 ```
 
@@ -35,6 +45,9 @@ resource "fluxvale_instance" "memos" {
 - `app_version_id` (Optional) — the id form; computed when the slug pair is set.
 - `cpu_cores` (Required, Float64) / `memory_mb` (Required) / `storage_gb` (Required) — the allocation. Resizes in place (storage up-only).
 - `env_vars` (Optional, map, write-only) — environment variables for the deploy, merged over the app version's defaults server-side. Updates in place: the provider diffs state against the plan into one `set`/`remove` merge PATCH. A null/omitted map clears the keys this resource previously managed; a null element is rejected — remove the key instead (an empty string is a value). Write-only — the API never echoes it, so plan can't see server-side drift by design, and the configured value is kept verbatim in state. Deployer-composed keys (OIDC recipe, backing URLs, instance URL) are refused on set and skipped on remove, so an apply that stops naming one converges. First-run contract `env` keys are fixed — set and remove both refuse (400) — and `forbidden_env` keys refuse set but allow remove; a contract `env` key already in state dead-ends until removed from state/config by hand.
+- `secret_env_vars` (Optional, map, sensitive, write-only) — secret environment variables, merged into the same in-place env PATCH as `env_vars`. Terraform never writes the values to state or plan files; the API never echoes them. A key present in both `env_vars` and `secret_env_vars` is a plan-time error. Requires Terraform 1.12+ or OpenTofu 1.13+. See [Secrets in Terraform](../guides/secrets.md).
+- `secret_env_vars_version` (Optional, integer) — the rotation signal for `secret_env_vars`: required whenever the map is set, and must be greater than 0. Bump it to rotate; removal is drop-key-plus-bump. The value is visible in state (it is not a secret).
+- `secret_env_vars_keys` (Computed, list of strings) — the sorted key names managed through `secret_env_vars`, never values. Null after import (the API cannot identify which env keys were secret); the first apply that sets `secret_env_vars` records the list.
 - `running` (Optional, bool) / `always_on` (Optional, bool) / `exposure` (Optional) — update in place.
 - `organization` (Optional) — id or slug; falls back to the provider-level `organization`, then to your sole organization (several memberships without a name is an error, never a silent pick).
 

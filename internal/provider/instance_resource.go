@@ -46,26 +46,29 @@ func (r *instanceResource) Metadata(_ context.Context, req resource.MetadataRequ
 // it explicitly, or let app + app_version resolve it — Read maps the
 // wire's id either way.
 type instanceModel struct {
-	Organization   types.String  `tfsdk:"organization"`
-	Name           types.String  `tfsdk:"name"`
-	AppVersionID   types.String  `tfsdk:"app_version_id"`
-	App            types.String  `tfsdk:"app"`
-	AppVersion     types.String  `tfsdk:"app_version"`
-	CPUCores       types.Float64 `tfsdk:"cpu_cores"`
-	MemoryMB       types.Int64   `tfsdk:"memory_mb"`
-	StorageGB      types.Int64   `tfsdk:"storage_gb"`
-	EnvVars        types.Map     `tfsdk:"env_vars"`
-	Running        types.Bool    `tfsdk:"running"`
-	AlwaysOn       types.Bool    `tfsdk:"always_on"`
-	Exposure       types.String  `tfsdk:"exposure"`
-	ID             types.String  `tfsdk:"id"`
-	Slug           types.String  `tfsdk:"slug"`
-	Namespace      types.String  `tfsdk:"namespace"`
-	Status         types.String  `tfsdk:"status"`
-	Port           types.Int64   `tfsdk:"port"`
-	Image          types.String  `tfsdk:"image"`
-	DeployedAt     types.String  `tfsdk:"deployed_at"`
-	OrganizationID types.String  `tfsdk:"organization_id"`
+	Organization         types.String  `tfsdk:"organization"`
+	Name                 types.String  `tfsdk:"name"`
+	AppVersionID         types.String  `tfsdk:"app_version_id"`
+	App                  types.String  `tfsdk:"app"`
+	AppVersion           types.String  `tfsdk:"app_version"`
+	CPUCores             types.Float64 `tfsdk:"cpu_cores"`
+	MemoryMB             types.Int64   `tfsdk:"memory_mb"`
+	StorageGB            types.Int64   `tfsdk:"storage_gb"`
+	EnvVars              types.Map     `tfsdk:"env_vars"`
+	SecretEnvVars        types.Map     `tfsdk:"secret_env_vars"`
+	SecretEnvVarsVersion types.Int64   `tfsdk:"secret_env_vars_version"`
+	SecretEnvVarsKeys    types.List    `tfsdk:"secret_env_vars_keys"`
+	Running              types.Bool    `tfsdk:"running"`
+	AlwaysOn             types.Bool    `tfsdk:"always_on"`
+	Exposure             types.String  `tfsdk:"exposure"`
+	ID                   types.String  `tfsdk:"id"`
+	Slug                 types.String  `tfsdk:"slug"`
+	Namespace            types.String  `tfsdk:"namespace"`
+	Status               types.String  `tfsdk:"status"`
+	Port                 types.Int64   `tfsdk:"port"`
+	Image                types.String  `tfsdk:"image"`
+	DeployedAt           types.String  `tfsdk:"deployed_at"`
+	OrganizationID       types.String  `tfsdk:"organization_id"`
 }
 
 func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
@@ -138,6 +141,33 @@ func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 					"`env` keys are fixed — set and remove both refuse with 400 — and `forbidden_env` keys refuse set " +
 					"but allow remove; a contract `env` key already in state dead-ends until removed from state/config " +
 					"by hand.",
+			},
+			"secret_env_vars": schema.MapAttribute{
+				ElementType: types.StringType,
+				Optional:    true,
+				Sensitive:   true,
+				WriteOnly:   true,
+				MarkdownDescription: "Secret environment variables for the deploy, merged into the same in-place env PATCH " +
+					"as `env_vars`. Terraform never writes values to state or plan files — the API never echoes them either — " +
+					"so this is the strongest input the provider can offer. Because a write-only value cannot produce a plan " +
+					"diff, `secret_env_vars_version` is the rotation signal: bump it whenever a value changes, and every key " +
+					"in the map is re-sent. A key present in both `env_vars` and `secret_env_vars` is a plan-time error. " +
+					"Requires Terraform 1.12+ or OpenTofu 1.13+.",
+			},
+			"secret_env_vars_version": schema.Int64Attribute{
+				Optional: true,
+				MarkdownDescription: "Rotation signal for `secret_env_vars` — required whenever the map is set, and must be " +
+					"greater than 0. Bump it to send the current secret values again. Removal is drop-key-plus-bump: remove " +
+					"the key from `secret_env_vars` and bump this integer; removing every key may instead drop both " +
+					"attributes (or set the map to `{}` and bump). With no secrets, leave both unset.",
+			},
+			"secret_env_vars_keys": schema.ListAttribute{
+				ElementType: types.StringType,
+				Computed:    true,
+				MarkdownDescription: "Sorted keys this resource manages through `secret_env_vars` — never values. The provider " +
+					"records the list on apply so reviewers can see which names are managed, and diffs it against the prior " +
+					"list to remove dropped keys (the drop-key-plus-bump protocol). `null` after import: the API cannot tell " +
+					"the provider which env keys were secret.",
 			},
 			"running": schema.BoolAttribute{
 				Optional:    true,
@@ -223,12 +253,28 @@ func (r *instanceResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 
+	// Write-only values live in the configuration, not the planned
+	// state (Terraform replaces them with null there). Read them from
+	// Config for this apply only.
+	if req.Config.Schema != nil {
+		var config instanceModel
+		resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		data.SecretEnvVars = config.SecretEnvVars
+	}
+
 	pd := r.data(&resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	createInstance(ctx, pd, &data, &resp.Diagnostics)
+	// Never let the write-only map ride state — the framework would
+	// null it on the real RPC path, and the direct-call tests should
+	// see the same contract.
+	data.SecretEnvVars = types.MapNull(types.StringType)
 	if resp.Diagnostics.HasError() {
 		// A post-POST failure leaves a live, billing instance. Tainted
 		// tracked state beats an untracked leak: write what we know so
@@ -273,6 +319,22 @@ func createInstance(ctx context.Context, pd *providerData, data *instanceModel, 
 		return
 	}
 
+	diags.Append(secretEnvPairDiagnostics(data.SecretEnvVars, data.SecretEnvVarsVersion)...)
+	if diags.HasError() {
+		return
+	}
+	secretVars, d := secretEnvMap(ctx, data.SecretEnvVars)
+	diags.Append(d...)
+	if diags.HasError() {
+		return
+	}
+	mergedEnv, d := mergeEnvMaps(envVars, secretVars)
+	diags.Append(d...)
+	if diags.HasError() {
+		return
+	}
+	data.SecretEnvVarsKeys = secretKeysList(sortedKeys(secretVars))
+
 	// The desired posture, captured before the create response's values
 	// map into the model — the comparison below is plan-vs-server.
 	wantExposure := data.Exposure
@@ -285,7 +347,7 @@ func createInstance(ctx context.Context, pd *providerData, data *instanceModel, 
 		StorageGB:      data.StorageGB.ValueInt64(),
 		AppVersionID:   versionID,
 		OrganizationID: orgID,
-		EnvVars:        envVars,
+		EnvVars:        mergedEnv,
 	})
 	if err != nil {
 		diags.AddError("Unable to create the Instance", err.Error())
@@ -490,6 +552,17 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
+	// The write-only map is null in the planned state; its values only
+	// exist in the configuration at apply time.
+	if req.Config.Schema != nil {
+		var config instanceModel
+		resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		plan.SecretEnvVars = config.SecretEnvVars
+	}
+
 	pd := r.data(&resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
@@ -501,6 +574,7 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 		resp.State.RemoveResource(ctx)
 		return
 	}
+	plan.SecretEnvVars = types.MapNull(types.StringType)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -568,6 +642,7 @@ func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceMo
 		// The wrapper writes the plan back to state; an unknown map
 		// cannot ride state, so keep the prior state's map instead.
 		plan.EnvVars = state.EnvVars
+		plan.SecretEnvVarsKeys = state.SecretEnvVarsKeys
 		return
 	}
 
@@ -579,6 +654,7 @@ func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceMo
 				diags.AddWarning(summary, fmt.Sprintf(
 					"instance %s: env_vars[%q] is unknown at apply time — skipped the in-place environment update; the keys this resource manages are left untouched.", id, key))
 				plan.EnvVars = state.EnvVars
+				plan.SecretEnvVarsKeys = state.SecretEnvVarsKeys
 				return
 			}
 			if s.IsNull() {
@@ -590,6 +666,50 @@ func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceMo
 			}
 			want[key] = s.ValueString()
 		}
+	}
+
+	// The version integer is the only visible rotation signal: the
+	// write-only map itself never diffs. An unknown secret value at
+	// apply time cannot be sent; keep the prior version and keys so
+	// state stays truthful.
+	if plan.SecretEnvVarsVersion.IsUnknown() || plan.SecretEnvVars.IsUnknown() {
+		diags.AddWarning(summary, fmt.Sprintf(
+			"instance %s: secret_env_vars is unknown at apply time — skipped the in-place environment update; the secret keys this resource manages are left untouched.", id))
+		plan.SecretEnvVarsVersion = state.SecretEnvVarsVersion
+		plan.SecretEnvVarsKeys = state.SecretEnvVarsKeys
+		return
+	}
+
+	secretChanged := !plan.SecretEnvVarsVersion.Equal(state.SecretEnvVarsVersion)
+	wantSecret := map[string]string{}
+	desiredKeys := secretKeysFromList(ctx, state.SecretEnvVarsKeys, diags)
+	if diags.HasError() {
+		return
+	}
+	if secretChanged {
+		diags.Append(secretEnvPairDiagnostics(plan.SecretEnvVars, plan.SecretEnvVarsVersion)...)
+		if diags.HasError() {
+			return
+		}
+		var d diag.Diagnostics
+		wantSecret, d = secretEnvMap(ctx, plan.SecretEnvVars)
+		diags.Append(d...)
+		if diags.HasError() {
+			return
+		}
+		desiredKeys = sortedKeys(wantSecret)
+	}
+
+	// A key lives in exactly one of the two maps. ValidateConfig
+	// refuses overlap at plan time; this guard also covers direct
+	// callers and keeps a mistaken config from sending two writes for
+	// one key.
+	if overlap := mapOverlap(want, wantSecret); len(overlap) > 0 {
+		diags.AddError(
+			"Invalid environment variables",
+			fmt.Sprintf("keys present in both env_vars and secret_env_vars: %s — put each key in exactly one map", strings.Join(overlap, ", ")),
+		)
+		return
 	}
 
 	have := map[string]string{}
@@ -607,19 +727,46 @@ func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceMo
 			set[key] = value
 		}
 	}
-	remove := make([]string, 0)
+	remove := map[string]bool{}
 	for key := range have {
 		if _, ok := want[key]; !ok {
-			remove = append(remove, key)
+			remove[key] = true
 		}
 	}
-	sort.Strings(remove)
+	// Rotation re-sends every secret key. Key removal is the prior
+	// secret key list minus the desired list.
+	for key, value := range wantSecret {
+		set[key] = value
+	}
+	desired := map[string]bool{}
+	for _, key := range desiredKeys {
+		desired[key] = true
+	}
+	for _, key := range secretKeysFromList(ctx, state.SecretEnvVarsKeys, diags) {
+		if !desired[key] {
+			remove[key] = true
+		}
+	}
+	if diags.HasError() {
+		return
+	}
+	// Never remove a key in the same PATCH that sets it (a key moving
+	// between the two maps is a set, not a remove).
+	for key := range set {
+		delete(remove, key)
+	}
+	removeList := make([]string, 0, len(remove))
+	for key := range remove {
+		removeList = append(removeList, key)
+	}
+	sort.Strings(removeList)
 
-	if len(set) == 0 && len(remove) == 0 {
+	plan.SecretEnvVarsKeys = secretKeysList(desiredKeys)
+	if len(set) == 0 && len(removeList) == 0 {
 		return
 	}
 
-	if _, err := pd.client.UpdateInstanceEnv(ctx, id, set, remove); err != nil {
+	if _, err := pd.client.UpdateInstanceEnv(ctx, id, set, removeList); err != nil {
 		diags.AddError("Unable to update the Instance environment", err.Error())
 	}
 }
