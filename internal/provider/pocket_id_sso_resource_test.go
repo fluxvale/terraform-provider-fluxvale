@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -58,6 +59,21 @@ func seededPocketIdSso(mutators ...func(*pocketIdSsoModel)) pocketIdSsoModel {
 			d.WiredAt = types.StringValue("2026-11-12T10:00:00Z")
 		},
 	}, mutators...)...)
+}
+
+// runPocketIdSsoUpdate drives Update with the seeded response state and
+// returns it for assertions.
+func runPocketIdSsoUpdate(t *testing.T, r *pocketIdSsoResource, sch schema.Schema, planData, stateData pocketIdSsoModel) *resource.UpdateResponse {
+	t.Helper()
+	ctx := context.Background()
+	resp := &resource.UpdateResponse{
+		State: tfsdk.State{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &stateData)},
+	}
+	r.Update(ctx, resource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &planData)},
+		State: tfsdk.State{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &stateData)},
+	}, resp)
+	return resp
 }
 
 // Create over the wrapper: connect's request is the generic-action
@@ -153,22 +169,124 @@ func TestPocketIdSsoCreateSurfacesBusyVerbatim(t *testing.T) {
 	}
 }
 
-// Read maps the wiring's five fields, keeps instance_id from the
-// lookup key (the wire's echo cannot move the identity), and the
-// resource id stays the instance id even though the document's
-// data.id is the wiring ROW id.
-func TestPocketIdSsoReadMapsWiringAndKeepsInstanceKey(t *testing.T) {
+// A wire echo that names a different instance/PocketID is a platform
+// bug — Create refuses with a diagnostic and writes no state (a
+// half-written state would be an inconsistent-result failure).
+func TestPocketIdSsoCreateRejectsHostileEcho(t *testing.T) {
+	cases := []struct {
+		name   string
+		doc    string
+		needle string
+	}{
+		{
+			name:   "different instance",
+			doc:    strings.ReplaceAll(pocketIDWiringFlat, `"instance_id": "inst-1"`, `"instance_id": "inst-other"`),
+			needle: "different instance",
+		},
+		{
+			name:   "different pocket id instance",
+			doc:    strings.ReplaceAll(pocketIDWiringFlat, `"pocket_id_instance_id": "pid-1"`, `"pocket_id_instance_id": "pid-other"`),
+			needle: "different PocketID instance",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, sch := newSchemadPocketIdSso(ctx, t)
+
+			f := newFakeAPI(t)
+			f.pocketIDConnectDoc = tc.doc
+			r.pd = f.testClient()
+
+			planData := testPocketIdSso()
+			req := resource.CreateRequest{
+				Plan: tfsdk.Plan{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &planData)},
+			}
+			resp := &resource.CreateResponse{
+				State: tfsdk.State{Schema: sch, Raw: tftypes.NewValue(sch.Type().TerraformType(ctx), nil)},
+			}
+			r.Create(ctx, req, resp)
+
+			assertError(t, &resp.Diagnostics, tc.needle, "Nothing was written to state")
+			if !resp.State.Raw.IsNull() {
+				t.Errorf("state = %v, want null (a hostile echo must not half-write state)", resp.State.Raw)
+			}
+		})
+	}
+}
+
+// Ash's uuid cast lowercases on the wire: a case-fold echo of the
+// configured identity keeps the CONFIGURED spelling in state — the
+// next plan is clean, not a replacement.
+func TestPocketIdSsoCreateCaseFoldKeepsConfiguredSpelling(t *testing.T) {
 	ctx := context.Background()
 	r, sch := newSchemadPocketIdSso(ctx, t)
 
 	f := newFakeAPI(t)
-	// A hostile echo: the lookup key is inst-1, the body claims
-	// another instance. The resource identity must not move.
-	hostile := strings.ReplaceAll(pocketIDWiringDoc, `"instance_id": "inst-1"`, `"instance_id": "inst-other"`)
-	f.pocketIDWiringGets = []scriptedResponse{script(200, hostile)}
+	f.pocketIDConnectDoc = pocketIDWiringFlat // lowercase echo
+	r.pd = f.testClient()
+
+	planData := testPocketIdSso(func(d *pocketIdSsoModel) {
+		d.InstanceID = types.StringValue("INST-1")
+		d.PocketIDInstanceID = types.StringValue("PID-1")
+	})
+	req := resource.CreateRequest{
+		Plan: tfsdk.Plan{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &planData)},
+	}
+	resp := &resource.CreateResponse{
+		State: tfsdk.State{Schema: sch, Raw: tftypes.NewValue(sch.Type().TerraformType(ctx), nil)},
+	}
+	r.Create(ctx, req, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create: %v", resp.Diagnostics)
+	}
+
+	findOne(t, f.all(), http.MethodPost, "/api/v1/instances/INST-1/connect-pocketid")
+
+	got := rawToPocketIdSso(ctx, t, sch, resp.State.Raw)
+	if got.ID.ValueString() != "INST-1" || got.InstanceID.ValueString() != "INST-1" {
+		t.Errorf("id/instance_id = %s/%s, want the configured spelling kept",
+			got.ID.ValueString(), got.InstanceID.ValueString())
+	}
+	if got.PocketIDInstanceID.ValueString() != "PID-1" {
+		t.Errorf("pocket_id_instance_id = %q, want the configured spelling kept", got.PocketIDInstanceID.ValueString())
+	}
+	for _, name := range []string{"instance_id", "pocket_id_instance_id"} {
+		planValue := got.InstanceID
+		if name == "pocket_id_instance_id" {
+			planValue = got.PocketIDInstanceID
+		}
+		planResp := &planmodifier.StringResponse{PlanValue: planValue}
+		sch.Attributes[name].(schema.StringAttribute).PlanModifiers[0].PlanModifyString(ctx, planmodifier.StringRequest{
+			Path:       path.Root(name),
+			PlanValue:  planValue,
+			StateValue: planValue,
+			State:      tfsdk.State{Schema: sch, Raw: resp.State.Raw},
+			Plan:       tfsdk.Plan{Schema: sch, Raw: resp.State.Raw},
+		}, planResp)
+		if planResp.RequiresReplace {
+			t.Errorf("%s: the case-fold state must not plan a replacement", name)
+		}
+	}
+}
+
+// Read maps the wiring's five fields. A case-fold echo names the same
+// UUID (Ash's cast lowercases), so the STATE spelling wins — a
+// lowercase-normalized echo must never plan a replacement, and the
+// resource id stays the instance id even though the document's data.id
+// is the wiring ROW id.
+func TestPocketIdSsoReadCaseFoldKeepsConfiguredSpelling(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadPocketIdSso(ctx, t)
+
+	f := newFakeAPI(t)
+	f.pocketIDWiringGets = []scriptedResponse{script(200, pocketIDWiringDoc)} // lowercase echo
 	r.pd = f.testClient()
 
 	stateData := seededPocketIdSso(func(d *pocketIdSsoModel) {
+		d.InstanceID = types.StringValue("INST-1")
+		d.PocketIDInstanceID = types.StringValue("PID-1")
+		d.ID = types.StringValue("INST-1")
 		d.RotateSecretOn = types.StringValue("v1")
 		d.PocketIDSecretID = types.StringValue("secret-old")
 	})
@@ -183,15 +301,18 @@ func TestPocketIdSsoReadMapsWiringAndKeepsInstanceKey(t *testing.T) {
 		t.Fatalf("Read: %v", resp.Diagnostics)
 	}
 
-	get := findOne(t, f.all(), http.MethodGet, "/api/v1/instances/inst-1/pocket-id-wiring")
+	get := findOne(t, f.all(), http.MethodGet, "/api/v1/instances/INST-1/pocket-id-wiring")
 	if len(get.query) != 0 {
 		t.Errorf("read query = %v, want none (the path is the whole lookup)", get.query)
 	}
 
 	got := rawToPocketIdSso(ctx, t, sch, resp.State.Raw)
-	if got.ID.ValueString() != "inst-1" || got.InstanceID.ValueString() != "inst-1" {
-		t.Errorf("id/instance_id = %s/%s, want the lookup key (never the doc's echo or data.id)",
+	if got.ID.ValueString() != "INST-1" || got.InstanceID.ValueString() != "INST-1" {
+		t.Errorf("id/instance_id = %s/%s, want the state spelling kept (case-fold echo)",
 			got.ID.ValueString(), got.InstanceID.ValueString())
+	}
+	if got.PocketIDInstanceID.ValueString() != "PID-1" {
+		t.Errorf("pocket_id_instance_id = %q, want the state spelling kept (case-fold echo)", got.PocketIDInstanceID.ValueString())
 	}
 	if got.PocketIDClientID.ValueString() != "client-1" || got.PocketIDSecretID.ValueString() != "secret-1" {
 		t.Errorf("client/secret ids = %s/%s, want the wire's",
@@ -202,6 +323,99 @@ func TestPocketIdSsoReadMapsWiringAndKeepsInstanceKey(t *testing.T) {
 	}
 	if got.RotateSecretOn.ValueString() != "v1" {
 		t.Error("rotate_secret_on lost from state — the wire has no echo, the config value survives")
+	}
+
+	// The plan over this state is clean: identical configured spellings
+	// never replace.
+	for _, name := range []string{"instance_id", "pocket_id_instance_id"} {
+		modifiers := sch.Attributes[name].(schema.StringAttribute).PlanModifiers
+		planValue := got.InstanceID
+		if name == "pocket_id_instance_id" {
+			planValue = got.PocketIDInstanceID
+		}
+		planResp := &planmodifier.StringResponse{PlanValue: planValue}
+		modifiers[0].PlanModifyString(ctx, planmodifier.StringRequest{
+			Path:       path.Root(name),
+			PlanValue:  planValue,
+			StateValue: planValue,
+			State:      tfsdk.State{Schema: sch, Raw: resp.State.Raw},
+			Plan:       tfsdk.Plan{Schema: sch, Raw: resp.State.Raw},
+		}, planResp)
+		if planResp.RequiresReplace {
+			t.Errorf("%s: the case-fold read state must not plan a replacement", name)
+		}
+	}
+}
+
+// A materially different echo is the wire's truth — an out-of-band
+// re-wire — and Read is allowed to drift state so the next plan shows
+// the replacement.
+func TestPocketIdSsoReadMaterialEchoDriftsState(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadPocketIdSso(ctx, t)
+
+	f := newFakeAPI(t)
+	drifted := strings.ReplaceAll(pocketIDWiringDoc, `"instance_id": "inst-1"`, `"instance_id": "inst-other"`)
+	drifted = strings.ReplaceAll(drifted, `"pocket_id_instance_id": "pid-1"`, `"pocket_id_instance_id": "pid-other"`)
+	f.pocketIDWiringGets = []scriptedResponse{script(200, drifted)}
+	r.pd = f.testClient()
+
+	stateData := seededPocketIdSso()
+	req := resource.ReadRequest{
+		State: tfsdk.State{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &stateData)},
+	}
+	resp := &resource.ReadResponse{
+		State: tfsdk.State{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &stateData)},
+	}
+	r.Read(ctx, req, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read: %v", resp.Diagnostics)
+	}
+
+	got := rawToPocketIdSso(ctx, t, sch, resp.State.Raw)
+	if got.InstanceID.ValueString() != "inst-other" || got.ID.ValueString() != "inst-other" {
+		t.Errorf("id/instance_id = %s/%s, want the wire's materially different identity",
+			got.ID.ValueString(), got.InstanceID.ValueString())
+	}
+	if got.PocketIDInstanceID.ValueString() != "pid-other" {
+		t.Errorf("pocket_id_instance_id = %q, want the wire's materially different identity", got.PocketIDInstanceID.ValueString())
+	}
+}
+
+// A null/unknown/empty lookup key is invalid state, not a reason to
+// forget the resource: no request is issued (an empty path 404 would
+// remove a live wiring from state).
+func TestPocketIdSsoReadGuardsEmptyKey(t *testing.T) {
+	cases := []struct {
+		name string
+		key  types.String
+	}{
+		{"null", types.StringNull()},
+		{"unknown", types.StringUnknown()},
+		{"empty", types.StringValue("")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, sch := newSchemadPocketIdSso(ctx, t)
+
+			f := newFakeAPI(t)
+			r.pd = f.testClient()
+
+			stateData := seededPocketIdSso(func(d *pocketIdSsoModel) { d.InstanceID = tc.key })
+			req := resource.ReadRequest{
+				State: tfsdk.State{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &stateData)},
+			}
+			resp := &resource.ReadResponse{
+				State: tfsdk.State{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &stateData)},
+			}
+			r.Read(ctx, req, resp)
+
+			assertError(t, &resp.Diagnostics, "Invalid PocketID SSO state", "instance_id", "empty key")
+			if reqs := f.all(); len(reqs) != 0 {
+				t.Errorf("requests = %+v, want none — an empty lookup key must not reach the wire", reqs)
+			}
+		})
 	}
 }
 
@@ -312,6 +526,107 @@ func TestPocketIdSsoUpdateWithoutTriggerReReads(t *testing.T) {
 		if req.method != http.MethodGet {
 			t.Errorf("unexpected %s %s — an unchanged trigger must not rotate", req.method, req.path)
 		}
+	}
+}
+
+// A rotate 400 (the platform's not-yet-deployed / lost refusal) is
+// surfaced verbatim; the prior state survives, not a half-rotated one.
+func TestPocketIdSsoUpdateRotate400SurfacesVerbatim(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadPocketIdSso(ctx, t)
+
+	f := newFakeAPI(t)
+	f.pocketIDRotateStatus = http.StatusBadRequest
+	f.pocketIDRotateDoc = `{"errors": [{"title": "InvalidArgument", "detail": "the sign-in wiring is not deployed right now"}]}`
+	r.pd = f.testClient()
+
+	stateData := seededPocketIdSso(func(d *pocketIdSsoModel) { d.RotateSecretOn = types.StringValue("v1") })
+	planData := seededPocketIdSso(func(d *pocketIdSsoModel) { d.RotateSecretOn = types.StringValue("v2") })
+	resp := runPocketIdSsoUpdate(t, r, sch, planData, stateData)
+
+	assertError(t, &resp.Diagnostics, "not deployed right now")
+	if resp.State.Raw.IsNull() {
+		t.Fatal("state is null after a refused rotate — Update must preserve the prior state")
+	}
+	got := rawToPocketIdSso(ctx, t, sch, resp.State.Raw)
+	if got.PocketIDSecretID.ValueString() != "secret-1" || got.RotateSecretOn.ValueString() != "v1" {
+		t.Errorf("secret/trigger = %s/%s, want the prior state (secret-1/v1)",
+			got.PocketIDSecretID.ValueString(), got.RotateSecretOn.ValueString())
+	}
+}
+
+// A rotate 404 is a gone wiring: Update cannot remove state (the
+// framework rejects a null state), so it names the refresh that will.
+func TestPocketIdSsoUpdateRotate404SignalsRefresh(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadPocketIdSso(ctx, t)
+
+	f := newFakeAPI(t)
+	f.pocketIDRotateStatus = http.StatusNotFound
+	f.pocketIDRotateDoc = `{"errors": [{"status": "404"}]}`
+	r.pd = f.testClient()
+
+	stateData := seededPocketIdSso(func(d *pocketIdSsoModel) { d.RotateSecretOn = types.StringValue("v1") })
+	planData := seededPocketIdSso(func(d *pocketIdSsoModel) { d.RotateSecretOn = types.StringValue("v2") })
+	resp := runPocketIdSsoUpdate(t, r, sch, planData, stateData)
+
+	assertError(t, &resp.Diagnostics, "The PocketID sign-in wiring is gone", "refresh and apply again", "remove it from state")
+	if resp.State.Raw.IsNull() {
+		t.Fatal("state is null after a 404 rotate — Update must return a non-null state")
+	}
+	got := rawToPocketIdSso(ctx, t, sch, resp.State.Raw)
+	if got.PocketIDSecretID.ValueString() != "secret-1" || got.ID.ValueString() != "inst-1" {
+		t.Errorf("secret/id = %s/%s, want the prior state preserved",
+			got.PocketIDSecretID.ValueString(), got.ID.ValueString())
+	}
+}
+
+// The same 404 stance on Update's equal-trigger read arm.
+func TestPocketIdSsoUpdateRead404SignalsRefresh(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadPocketIdSso(ctx, t)
+
+	f := newFakeAPI(t)
+	f.pocketIDWiringGets = []scriptedResponse{script(http.StatusNotFound, `{"errors": [{"status": "404"}]}`)}
+	r.pd = f.testClient()
+
+	seeded := seededPocketIdSso(func(d *pocketIdSsoModel) { d.RotateSecretOn = types.StringValue("v1") })
+	resp := runPocketIdSsoUpdate(t, r, sch, seeded, seeded)
+
+	assertError(t, &resp.Diagnostics, "The PocketID sign-in wiring is gone", "refresh and apply again")
+	if resp.State.Raw.IsNull() {
+		t.Fatal("state is null after a 404 read in Update — Update must return a non-null state")
+	}
+	if got := rawToPocketIdSso(ctx, t, sch, resp.State.Raw); got.PocketIDSecretID.ValueString() != "secret-1" {
+		t.Errorf("secret = %q, want the prior state preserved", got.PocketIDSecretID.ValueString())
+	}
+}
+
+// A rotate echo of a different pocket_id_instance_id is pinned to the
+// plan's identity: the configured attribute never takes a wire spelling
+// mid-Update (the next refresh decides whether it is real drift).
+func TestPocketIdSsoUpdatePinsPocketIDInstanceEcho(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadPocketIdSso(ctx, t)
+
+	f := newFakeAPI(t)
+	f.pocketIDRotateDoc = strings.ReplaceAll(pocketIDRotatedFlat,
+		`"pocket_id_instance_id": "pid-1"`, `"pocket_id_instance_id": "pid-2"`)
+	r.pd = f.testClient()
+
+	stateData := seededPocketIdSso(func(d *pocketIdSsoModel) { d.RotateSecretOn = types.StringValue("v1") })
+	planData := seededPocketIdSso(func(d *pocketIdSsoModel) { d.RotateSecretOn = types.StringValue("v2") })
+	resp := runPocketIdSsoUpdate(t, r, sch, planData, stateData)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update: %v — a differing PocketID echo must not fail the apply", resp.Diagnostics)
+	}
+
+	got := rawToPocketIdSso(ctx, t, sch, resp.State.Raw)
+	if got.PocketIDInstanceID.ValueString() != "pid-1" {
+		t.Errorf("pocket_id_instance_id = %q, want the plan's pid-1 pinned", got.PocketIDInstanceID.ValueString())
+	}
+	if got.PocketIDSecretID.ValueString() != "secret-2" {
+		t.Errorf("pocket_id_secret_id = %q, want the rotate's secret-2", got.PocketIDSecretID.ValueString())
 	}
 }
 
@@ -445,8 +760,30 @@ func TestPocketIdSsoSchemaAndReplacementContract(t *testing.T) {
 			t.Errorf("%s is not Computed", name)
 		}
 	}
-	if len(sch.Attributes["id"].(schema.StringAttribute).PlanModifiers) == 0 {
-		t.Error("id has no plan modifier — an in-place rotation would turn it unknown")
+	idModifiers := sch.Attributes["id"].(schema.StringAttribute).PlanModifiers
+	if len(idModifiers) != 1 {
+		t.Fatalf("id plan modifiers = %d, want exactly UseStateForUnknown", len(idModifiers))
+	}
+	const useStateDescription = "Once set, the value of this attribute in state will not change."
+	if got := idModifiers[0].Description(ctx); got != useStateDescription {
+		t.Errorf("id modifier description = %q, want the UseStateForUnknown description", got)
+	}
+	if got := fmt.Sprintf("%T", idModifiers[0]); !strings.Contains(got, "useStateForUnknown") {
+		t.Errorf("id modifier type = %s, want a UseStateForUnknown modifier", got)
+	}
+	stateData := seededPocketIdSso()
+	planData := seededPocketIdSso()
+	keepResp := &planmodifier.StringResponse{PlanValue: types.StringUnknown()}
+	idModifiers[0].PlanModifyString(ctx, planmodifier.StringRequest{
+		Path:        path.Root("id"),
+		ConfigValue: types.StringNull(),
+		PlanValue:   types.StringUnknown(),
+		StateValue:  types.StringValue("inst-1"),
+		State:       tfsdk.State{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &stateData)},
+		Plan:        tfsdk.Plan{Schema: sch, Raw: pocketIdSsoToRaw(ctx, t, sch, &planData)},
+	}, keepResp)
+	if keepResp.PlanValue.ValueString() != "inst-1" {
+		t.Errorf("id plan = %q, want the prior state carried across an in-place update", keepResp.PlanValue.ValueString())
 	}
 
 	md := &resource.MetadataResponse{}

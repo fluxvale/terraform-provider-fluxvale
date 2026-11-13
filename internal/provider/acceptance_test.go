@@ -653,6 +653,67 @@ resource "fluxvale_pocket_id_sso" "sso" {
 `
 	}
 
+	// instanceOnlyConfig removes the SSO resource while keeping the
+	// instance: the apply's only side effect is Delete → disconnect.
+	// The variable declarations stay (an unused variable is legal) so
+	// the same ConfigVariables feed every step.
+	instanceOnlyConfig := accVarDecls + `
+variable "app_slug" {
+  type = string
+}
+
+variable "pocket_id_instance_id" {
+  type = string
+}
+
+data "fluxvale_app_versions" "sso" {
+  app = var.app_slug
+}
+
+resource "fluxvale_instance" "sso" {
+  name        = "acc-pocket-id-sso"
+  app         = var.app_slug
+  app_version = data.fluxvale_app_versions.sso.app_versions[0].version
+  cpu_cores   = 0.5
+  memory_mb   = 256
+  storage_gb  = 1
+}
+`
+
+	// checkDisconnected proves the SSO resource's own Delete did the
+	// disconnect: the wiring is 404 while the instance still answers.
+	checkDisconnected := func(s *terraform.State) error {
+		if _, ok := s.RootModule().Resources["fluxvale_pocket_id_sso.sso"]; ok {
+			return fmt.Errorf("fluxvale_pocket_id_sso.sso is still in state — the step did not remove only the wiring")
+		}
+		rs, ok := s.RootModule().Resources["fluxvale_instance.sso"]
+		if !ok {
+			return fmt.Errorf("fluxvale_instance.sso is not in state")
+		}
+		c := accClient(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if _, err := c.GetInstance(ctx, rs.Primary.ID); err != nil {
+			return fmt.Errorf("instance %s disappeared while removing only the wiring: %w", rs.Primary.ID, err)
+		}
+		if _, err := c.GetPocketIdWiring(ctx, rs.Primary.ID); err == nil {
+			return fmt.Errorf("wiring for instance %s still exists after removing only the SSO resource", rs.Primary.ID)
+		} else {
+			var apiErr *client.APIError
+			if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
+				return fmt.Errorf("checking the disconnected wiring for instance %s: %w", rs.Primary.ID, err)
+			}
+		}
+		return nil
+	}
+
+	ssoVars := config.Variables{
+		"api_url":               accVars(t)["api_url"],
+		"token":                 accVars(t)["token"],
+		"app_slug":              config.StringVariable(accSsoAppSlug()),
+		"pocket_id_instance_id": config.StringVariable(os.Getenv("TF_ACC_POCKET_ID_INSTANCE_ID")),
+	}
+
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: accProtoV6(),
 		PreCheck:                 func() { accPreCheck(t) },
@@ -681,13 +742,8 @@ resource "fluxvale_pocket_id_sso" "sso" {
 		},
 		Steps: []resource.TestStep{
 			{
-				Config: ssoConfig("v1"),
-				ConfigVariables: config.Variables{
-					"api_url":               accVars(t)["api_url"],
-					"token":                 accVars(t)["token"],
-					"app_slug":              config.StringVariable(accSsoAppSlug()),
-					"pocket_id_instance_id": config.StringVariable(os.Getenv("TF_ACC_POCKET_ID_INSTANCE_ID")),
-				},
+				Config:          ssoConfig("v1"),
+				ConfigVariables: ssoVars,
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("fluxvale_instance.sso", "status", "running"),
 					resource.TestCheckResourceAttr("fluxvale_pocket_id_sso.sso", "rotate_secret_on", "v1"),
@@ -698,16 +754,21 @@ resource "fluxvale_pocket_id_sso" "sso" {
 				),
 			},
 			{
-				Config: ssoConfig("v2"),
-				ConfigVariables: config.Variables{
-					"api_url":               accVars(t)["api_url"],
-					"token":                 accVars(t)["token"],
-					"app_slug":              config.StringVariable(accSsoAppSlug()),
-					"pocket_id_instance_id": config.StringVariable(os.Getenv("TF_ACC_POCKET_ID_INSTANCE_ID")),
-				},
+				Config:          ssoConfig("v2"),
+				ConfigVariables: ssoVars,
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("fluxvale_pocket_id_sso.sso", "rotate_secret_on", "v2"),
 					checkWiring,
+				),
+			},
+			{
+				// Destroy ONLY the wiring: the instance stays, so the
+				// 404 below can only come from the resource's Delete.
+				Config:          instanceOnlyConfig,
+				ConfigVariables: ssoVars,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("fluxvale_instance.sso", "status", "running"),
+					checkDisconnected,
 				),
 			},
 		},

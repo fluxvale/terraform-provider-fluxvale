@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/fluxvale/terraform-provider-fluxvale/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -148,7 +149,14 @@ func (r *pocketIdSsoResource) Create(ctx context.Context, req resource.CreateReq
 		return
 	}
 
-	wiring, err := pd.client.ConnectPocketId(ctx, data.InstanceID.ValueString(), data.PocketIDInstanceID.ValueString())
+	// The plan's identity spellings are authoritative: Ash's uuid cast
+	// lowercases on the wire, so a case-fold echo must never replace
+	// the configured value (and a materially different echo is a
+	// platform bug that must not half-write state).
+	planInstanceID := data.InstanceID.ValueString()
+	planPocketID := data.PocketIDInstanceID.ValueString()
+
+	wiring, err := pd.client.ConnectPocketId(ctx, planInstanceID, planPocketID)
 	if err != nil {
 		// Pre-state: the POST refused (busy / flag off / custody /
 		// scope), so nothing half-writes state. The platform's wording
@@ -156,17 +164,47 @@ func (r *pocketIdSsoResource) Create(ctx context.Context, req resource.CreateReq
 		resp.Diagnostics.AddError("Unable to connect the PocketID sign-in", err.Error())
 		return
 	}
+	if !strings.EqualFold(wiring.InstanceID, planInstanceID) {
+		resp.Diagnostics.AddError(
+			"The platform wired a different instance",
+			fmt.Sprintf("connect answered for instance %q, but this resource asked for %q. Nothing was written to state — "+
+				"refresh and inspect the platform's wiring before applying again.", wiring.InstanceID, planInstanceID),
+		)
+		return
+	}
+	if !strings.EqualFold(wiring.PocketIDInstanceID, planPocketID) {
+		resp.Diagnostics.AddError(
+			"The platform wired a different PocketID instance",
+			fmt.Sprintf("connect answered with PocketID instance %q, but this resource asked for %q. Nothing was written to state — "+
+				"refresh and inspect the platform's wiring before applying again.", wiring.PocketIDInstanceID, planPocketID),
+		)
+		return
+	}
 	mapPocketIdSso(&data, wiring)
+	data.InstanceID = types.StringValue(planInstanceID)
+	data.ID = types.StringValue(planInstanceID)
+	data.PocketIDInstanceID = types.StringValue(planPocketID)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
 // readPocketIdSso refreshes the model from the wiring read and returns
 // true when the instance has no wiring (404 — the caller removes it
-// from state: no wiring is gone).
+// from state: no wiring is gone). A null/unknown/empty lookup key is
+// refused before any request: GET /instances//pocket-id-wiring would
+// 404 and remove a LIVE wiring from state.
 func readPocketIdSso(ctx context.Context, pd *providerData, data *pocketIdSsoModel, diags *diag.Diagnostics) bool {
-	// The lookup key is the state's instance id, never a plan unknown:
-	// reading by an empty key would 404 a LIVE wiring out of state.
+	// The lookup key is the state's instance id — an empty key is
+	// invalid state, never a reason to forget the resource.
+	if data.InstanceID.IsNull() || data.InstanceID.IsUnknown() || data.InstanceID.ValueString() == "" {
+		diags.AddError(
+			"Invalid PocketID SSO state",
+			"The state's \"instance_id\" is null, unknown, or empty — refusing to read the wiring by an empty key "+
+				"(a 404 would remove a live wiring from state). Refresh the resource or import it again.",
+		)
+		return false
+	}
 	instanceID := data.InstanceID.ValueString()
+	priorPocketID := data.PocketIDInstanceID.ValueString()
 	wiring, err := pd.client.GetPocketIdWiring(ctx, instanceID)
 	if err != nil {
 		var apiErr *client.APIError
@@ -177,11 +215,25 @@ func readPocketIdSso(ctx context.Context, pd *providerData, data *pocketIdSsoMod
 		return false
 	}
 	mapPocketIdSso(data, wiring)
-	// The wire echoes instance_id; the lookup key is the identity the
-	// provider asked about, and the resource id rides it.
-	data.InstanceID = types.StringValue(instanceID)
-	data.ID = types.StringValue(instanceID)
+	// A case-fold echo names the same UUID: keep the configured/state
+	// spelling so a lowercase-normalized echo never plans a replacement.
+	// A materially different echo is the wire's truth — an out-of-band
+	// re-wire — and Read is allowed to drift state there.
+	data.InstanceID = types.StringValue(pinWireIdentity(wiring.InstanceID, instanceID))
+	data.PocketIDInstanceID = types.StringValue(pinWireIdentity(wiring.PocketIDInstanceID, priorPocketID))
+	data.ID = data.InstanceID
 	return false
+}
+
+// pinWireIdentity keeps the prior (configured/state) spelling when the
+// wire's echo names the same value case-insensitively — Ash's uuid cast
+// lowercases — and takes the wire value when it is materially
+// different (an out-of-band re-wire).
+func pinWireIdentity(wire, prior string) string {
+	if prior != "" && strings.EqualFold(wire, prior) {
+		return prior
+	}
+	return wire
 }
 
 // mapPocketIdSso writes the wiring's fields into the model. The id is
@@ -238,8 +290,12 @@ func (r *pocketIdSsoResource) Update(ctx context.Context, req resource.UpdateReq
 	}
 
 	// The row identity is the state's instance id — never a plan
-	// unknown (the custom-domain update's stance).
+	// unknown (the custom-domain update's stance). The configured
+	// identity spellings are the plan's; every wire echo is folded back
+	// onto them so a case-normalized response can never trip the
+	// framework's inconsistent-result check.
 	instanceID := state.InstanceID.ValueString()
+	planPocketID := plan.PocketIDInstanceID.ValueString()
 	plan.InstanceID = types.StringValue(instanceID)
 
 	if !plan.RotateSecretOn.Equal(state.RotateSecretOn) {
@@ -247,9 +303,9 @@ func (r *pocketIdSsoResource) Update(ctx context.Context, req resource.UpdateReq
 		if err != nil {
 			var apiErr *client.APIError
 			if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
-				// The instance (and its wiring) is gone — removed,
-				// never plan-over-ghost.
-				resp.State.RemoveResource(ctx)
+				// An Update must return a state; a gone wiring is a
+				// refresh problem, never a silent forget here.
+				addWiringGoneUpdateError(&resp.Diagnostics)
 				return
 			}
 			resp.Diagnostics.AddError("Unable to rotate the PocketID client secret", err.Error())
@@ -258,12 +314,15 @@ func (r *pocketIdSsoResource) Update(ctx context.Context, req resource.UpdateReq
 		mapPocketIdSso(&plan, wiring)
 		plan.InstanceID = types.StringValue(instanceID)
 		plan.ID = types.StringValue(instanceID)
+		plan.PocketIDInstanceID = types.StringValue(planPocketID)
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 		return
 	}
 
 	if readPocketIdSso(ctx, pd, &plan, &resp.Diagnostics) {
-		resp.State.RemoveResource(ctx)
+		// Same stance as the rotate arm: Update must emit state; the
+		// next refresh is what removes a gone wiring.
+		addWiringGoneUpdateError(&resp.Diagnostics)
 		return
 	}
 	if resp.Diagnostics.HasError() {
@@ -271,7 +330,18 @@ func (r *pocketIdSsoResource) Update(ctx context.Context, req resource.UpdateReq
 	}
 	plan.InstanceID = types.StringValue(instanceID)
 	plan.ID = types.StringValue(instanceID)
+	plan.PocketIDInstanceID = types.StringValue(planPocketID)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// addWiringGoneUpdateError is the Update 404 answer: the framework
+// requires a non-null state from Update, so a gone wiring cannot be
+// removed here — name the refresh that will.
+func addWiringGoneUpdateError(diags *diag.Diagnostics) {
+	diags.AddError(
+		"The PocketID sign-in wiring is gone",
+		"the sign-in wiring is gone — refresh and apply again; Terraform will remove it from state",
+	)
 }
 
 func (r *pocketIdSsoResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
