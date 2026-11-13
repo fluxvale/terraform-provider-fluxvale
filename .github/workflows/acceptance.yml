@@ -28,6 +28,9 @@
 #     acceptance run is a standing monthly charge; later runs adopt
 #     the existing gateway.
 #   - TF_ACC_DOMAIN — the custom domain class.
+#   - TF_ACC_POCKET_ID_INSTANCE_ID — the PocketID SSO class (the
+#     PocketID instance id; public + custody-ready, flag on). Optional
+#     TF_ACC_SSO_APP_SLUG overrides the SSO app (default vaultwarden).
 #
 # The CLI driver: plugin-testing drives a terraform-shaped CLI —
 # TF_ACC_TERRAFORM_PATH points at the mise-pinned tofu,
@@ -127,6 +130,8 @@ jobs:
           TF_ACC_TAILNET_DOMAIN: ${{ secrets.TF_ACC_TAILNET_DOMAIN }}
           TF_ACC_TAILSCALE_AUTH_KEY: ${{ secrets.TF_ACC_TAILSCALE_AUTH_KEY }}
           TF_ACC_DOMAIN: ${{ secrets.TF_ACC_DOMAIN }}
+          TF_ACC_POCKET_ID_INSTANCE_ID: ${{ secrets.TF_ACC_POCKET_ID_INSTANCE_ID }}
+          TF_ACC_SSO_APP_SLUG: ${{ secrets.TF_ACC_SSO_APP_SLUG }}
           # plugin-testing registers the in-process provider under its
           # default registry.terraform.io address; tofu resolves the
           # implicit provider against registry.opentofu.org — the two

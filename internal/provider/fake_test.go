@@ -72,6 +72,17 @@ type fakeAPI struct {
 	domainDeleteStatus int
 	domainDeleteDoc    string
 
+	// PocketID SSO slice (#731 T3): the connect/disconnect/rotate POSTs
+	// render flat generic-action bodies (statuses script the 400/404
+	// arms); the wiring read is a JSON:API document.
+	pocketIDConnectStatus    int
+	pocketIDConnectDoc       string
+	pocketIDWiringGets       []scriptedResponse // GET /instances/:id/pocket-id-wiring
+	pocketIDDisconnectStatus int
+	pocketIDDisconnectDoc    string
+	pocketIDRotateStatus     int
+	pocketIDRotateDoc        string
+
 	t *testing.T
 }
 
@@ -102,6 +113,13 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		domainPostDoc:      domainPendingDoc,
 		domainDeleteStatus: http.StatusOK,
 		domainDeleteDoc:    domainDeleteDoc,
+
+		pocketIDConnectStatus:    http.StatusCreated,
+		pocketIDConnectDoc:       pocketIDWiringFlat,
+		pocketIDDisconnectStatus: http.StatusCreated,
+		pocketIDDisconnectDoc:    pocketIDDisconnectDoc,
+		pocketIDRotateStatus:     http.StatusCreated,
+		pocketIDRotateDoc:        pocketIDRotatedFlat,
 	}
 	mux := http.NewServeMux()
 
@@ -144,6 +162,36 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/backup-setting") {
 			f.record(r, nil)
 			f.scriptedGet(w, r, &f.backupGets)
+			return
+		}
+
+		// PocketID SSO (#731 T3): the three mutation POSTs render the
+		// flat generic-action body; the read is the JSON:API document.
+		// Handled in this subtree (like backup-setting) to stay clear
+		// of the by-slug pattern's overlap. Every request is recorded
+		// with its body/query — the wire-shape proof.
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/connect-pocketid"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.record(r, body)
+			f.json(w, f.pocketIDConnectStatus, f.pocketIDConnectDoc)
+			return
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/disconnect-pocketid"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.record(r, body)
+			f.json(w, f.pocketIDDisconnectStatus, f.pocketIDDisconnectDoc)
+			return
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/rotate-pocketid-secret"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.record(r, body)
+			f.json(w, f.pocketIDRotateStatus, f.pocketIDRotateDoc)
+			return
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pocket-id-wiring"):
+			f.record(r, nil)
+			f.scriptedGet(w, r, &f.pocketIDWiringGets)
 			return
 		}
 
@@ -449,6 +497,28 @@ const (
 	// The teardown DELETE's 200 renders the row flat (the generic
 	// action's shape — the id at the top level, no JSON:API envelope).
 	domainDeleteDoc = `{"id": "dom-1", "domain": "apps.customer.com", "kind": "custom", "state": "pending"}`
+
+	// The PocketID wiring (#731 T3). The mutation routes render the
+	// generic action's FLAT body; the read renders the JSON:API
+	// document whose data.id is the wiring ROW id (deliberately not the
+	// Terraform id). The rotate arm carries the new secret id.
+	pocketIDWiringFlat = `{"instance_id": "inst-1", "pocket_id_instance_id": "pid-1",
+		"pocket_id_client_id": "client-1", "pocket_id_secret_id": "secret-1",
+		"wired_at": "2026-11-12T10:00:00Z"}`
+
+	pocketIDRotatedFlat = `{"instance_id": "inst-1", "pocket_id_instance_id": "pid-1",
+		"pocket_id_client_id": "client-1", "pocket_id_secret_id": "secret-2",
+		"wired_at": "2026-11-12T10:00:00Z"}`
+
+	pocketIDWiringDoc = `{"data": {"id": "wiring-row-1", "type": "pocket_id_wiring", "attributes": {
+		"instance_id": "inst-1", "pocket_id_instance_id": "pid-1",
+		"pocket_id_client_id": "client-1", "pocket_id_secret_id": "secret-1",
+		"wired_at": "2026-11-12T10:00:00Z"}}}`
+
+	pocketIDDisconnectDoc = `{"instance_id": "inst-1", "client_deleted": true}`
+
+	// The idempotent arm: nothing wired — still a success.
+	pocketIDDisconnectNoWiringDoc = `{"instance_id": "inst-1", "client_deleted": false}`
 )
 
 // statusDoc renders the running fixture with a different status — the
@@ -563,6 +633,24 @@ func testDomain(mutators ...func(*customDomainModel)) customDomainModel {
 		Kind:           types.StringNull(),
 		State:          types.StringNull(),
 		OrganizationID: types.StringNull(),
+	}
+	for _, m := range mutators {
+		m(&data)
+	}
+	return data
+}
+
+// testPocketIdSso builds a pocketIdSsoModel with the required fields
+// set; mutators adjust the rest.
+func testPocketIdSso(mutators ...func(*pocketIdSsoModel)) pocketIdSsoModel {
+	data := pocketIdSsoModel{
+		InstanceID:         types.StringValue("inst-1"),
+		PocketIDInstanceID: types.StringValue("pid-1"),
+		RotateSecretOn:     types.StringNull(),
+		PocketIDClientID:   types.StringNull(),
+		PocketIDSecretID:   types.StringNull(),
+		WiredAt:            types.StringNull(),
+		ID:                 types.StringNull(),
 	}
 	for _, m := range mutators {
 		m(&data)

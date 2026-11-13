@@ -43,6 +43,7 @@ Resources:
 - [`fluxvale_instance_backups`](resources/instance_backups.md) — an instance's backup destination (R2)
 - [`fluxvale_access_gateway`](resources/access_gateway.md) — the org's private-access gateway
 - [`fluxvale_custom_domain`](resources/custom_domain.md) — your own domain on the private-access edge
+- [`fluxvale_pocket_id_sso`](resources/pocket_id_sso.md) — an instance's PocketID sign-in wiring
 
 Data sources:
 

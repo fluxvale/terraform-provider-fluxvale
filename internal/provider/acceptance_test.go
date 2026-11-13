@@ -39,6 +39,13 @@ import (
 //	                          (the gateway persists after destroy — no API delete
 //	                          route — and bills monthly)
 //	TF_ACC_DOMAIN             optional — the custom-domain test skips without it
+//	TF_ACC_POCKET_ID_INSTANCE_ID
+//	                          optional — the PocketID SSO test skips without it; it
+//	                          names a custody-ready public PocketID instance in the
+//	                          org, and the platform's pocketid_sso_wiring flag must
+//	                          be on (seeded enabled)
+//	TF_ACC_SSO_APP_SLUG       optional — the SSO test's app, default "vaultwarden"
+//	                          (must carry an OIDC recipe in its version)
 //
 // The driver: plugin-testing needs a real terraform-shaped CLI in
 // PATH or TF_ACC_TERRAFORM_PATH — the workflow points the latter at
@@ -547,5 +554,223 @@ resource "fluxvale_custom_domain" "personal" {
 				resource.TestCheckResourceAttr("fluxvale_custom_domain.personal", "state", "pending"),
 			),
 		}},
+	})
+}
+
+// accSsoAppSlug is the SSO acceptance class's app — a version that
+// declares an OIDC recipe (vaultwarden/vikunja in the seeded catalog).
+// It is deliberately separate from TF_ACC_APP_SLUG: the other classes'
+// app need not be SSO-capable.
+func accSsoAppSlug() string {
+	if s := os.Getenv("TF_ACC_SSO_APP_SLUG"); s != "" {
+		return s
+	}
+	return "vaultwarden"
+}
+
+// TestAccPocketIdSso exercises the typed sign-in wiring on the real
+// wire: create a fresh app instance, connect it to the org's
+// custody-ready PocketID, read the wiring back, rotate the client
+// secret by bumping rotate_secret_on (the client id and instance id
+// must not move), then let destroy disconnect. Skips as a class
+// without TF_ACC_POCKET_ID_INSTANCE_ID (the PocketID instance's id);
+// the platform's pocketid_sso_wiring flag must be on (seeded enabled),
+// and the PocketID instance must be public with held-key custody.
+func TestAccPocketIdSso(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set — the acceptance lane runs nightly/tags/dispatch, never per-PR (wallet cost)")
+	}
+	accSkip(t, "pocket id sso", "TF_ACC_POCKET_ID_INSTANCE_ID")
+
+	var firstClientID, firstSecretID string
+	checkWiring := func(s *terraform.State) error {
+		wiringRS, ok := s.RootModule().Resources["fluxvale_pocket_id_sso.sso"]
+		if !ok {
+			return fmt.Errorf("fluxvale_pocket_id_sso.sso is not in state")
+		}
+		instanceRS, ok := s.RootModule().Resources["fluxvale_instance.sso"]
+		if !ok {
+			return fmt.Errorf("fluxvale_instance.sso is not in state")
+		}
+		instanceID := instanceRS.Primary.ID
+		if wiringRS.Primary.ID != instanceID {
+			return fmt.Errorf("wiring id = %q, want the instance id %q (the one-wiring key)",
+				wiringRS.Primary.ID, instanceID)
+		}
+		if got := wiringRS.Primary.Attributes["instance_id"]; got != instanceID {
+			return fmt.Errorf("instance_id = %q, want %q", got, instanceID)
+		}
+		clientID := wiringRS.Primary.Attributes["pocket_id_client_id"]
+		secretID := wiringRS.Primary.Attributes["pocket_id_secret_id"]
+		if clientID == "" || secretID == "" {
+			return fmt.Errorf("client/secret ids are empty (%q/%q) — the wiring did not read back", clientID, secretID)
+		}
+		if wiringRS.Primary.Attributes["wired_at"] == "" {
+			return fmt.Errorf("wired_at is empty — the wiring did not read back")
+		}
+		if firstClientID == "" {
+			firstClientID, firstSecretID = clientID, secretID
+			return nil
+		}
+		if clientID != firstClientID {
+			return fmt.Errorf("client id changed across a rotation: %q -> %q (rotation must not mint a new client)",
+				firstClientID, clientID)
+		}
+		if secretID == firstSecretID {
+			return fmt.Errorf("secret id did not rotate: still %q", secretID)
+		}
+		return nil
+	}
+
+	ssoConfig := func(rotate string) string {
+		return accVarDecls + `
+variable "app_slug" {
+  type = string
+}
+
+variable "pocket_id_instance_id" {
+  type = string
+}
+
+data "fluxvale_app_versions" "sso" {
+  app = var.app_slug
+}
+
+resource "fluxvale_instance" "sso" {
+  name        = "acc-pocket-id-sso"
+  app         = var.app_slug
+  app_version = data.fluxvale_app_versions.sso.app_versions[0].version
+  cpu_cores   = 0.5
+  memory_mb   = 256
+  storage_gb  = 1
+}
+
+resource "fluxvale_pocket_id_sso" "sso" {
+  instance_id           = fluxvale_instance.sso.id
+  pocket_id_instance_id = var.pocket_id_instance_id
+  rotate_secret_on      = "` + rotate + `"
+}
+`
+	}
+
+	// instanceOnlyConfig removes the SSO resource while keeping the
+	// instance: the apply's only side effect is Delete → disconnect.
+	// The variable declarations stay (an unused variable is legal) so
+	// the same ConfigVariables feed every step.
+	instanceOnlyConfig := accVarDecls + `
+variable "app_slug" {
+  type = string
+}
+
+variable "pocket_id_instance_id" {
+  type = string
+}
+
+data "fluxvale_app_versions" "sso" {
+  app = var.app_slug
+}
+
+resource "fluxvale_instance" "sso" {
+  name        = "acc-pocket-id-sso"
+  app         = var.app_slug
+  app_version = data.fluxvale_app_versions.sso.app_versions[0].version
+  cpu_cores   = 0.5
+  memory_mb   = 256
+  storage_gb  = 1
+}
+`
+
+	// checkDisconnected proves the SSO resource's own Delete did the
+	// disconnect: the wiring is 404 while the instance still answers.
+	checkDisconnected := func(s *terraform.State) error {
+		if _, ok := s.RootModule().Resources["fluxvale_pocket_id_sso.sso"]; ok {
+			return fmt.Errorf("fluxvale_pocket_id_sso.sso is still in state — the step did not remove only the wiring")
+		}
+		rs, ok := s.RootModule().Resources["fluxvale_instance.sso"]
+		if !ok {
+			return fmt.Errorf("fluxvale_instance.sso is not in state")
+		}
+		c := accClient(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if _, err := c.GetInstance(ctx, rs.Primary.ID); err != nil {
+			return fmt.Errorf("instance %s disappeared while removing only the wiring: %w", rs.Primary.ID, err)
+		}
+		if _, err := c.GetPocketIdWiring(ctx, rs.Primary.ID); err == nil {
+			return fmt.Errorf("wiring for instance %s still exists after removing only the SSO resource", rs.Primary.ID)
+		} else {
+			var apiErr *client.APIError
+			if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
+				return fmt.Errorf("checking the disconnected wiring for instance %s: %w", rs.Primary.ID, err)
+			}
+		}
+		return nil
+	}
+
+	ssoVars := config.Variables{
+		"api_url":               accVars(t)["api_url"],
+		"token":                 accVars(t)["token"],
+		"app_slug":              config.StringVariable(accSsoAppSlug()),
+		"pocket_id_instance_id": config.StringVariable(os.Getenv("TF_ACC_POCKET_ID_INSTANCE_ID")),
+	}
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: accProtoV6(),
+		PreCheck:                 func() { accPreCheck(t) },
+		CheckDestroy: func(s *terraform.State) error {
+			// Dependents destroy before their instance: by here the
+			// disconnect ran and the wiring (then the instance) is gone.
+			if err := accInstancesGone(t)(s); err != nil {
+				return err
+			}
+			rs, ok := s.RootModule().Resources["fluxvale_instance.sso"]
+			if !ok {
+				return fmt.Errorf("fluxvale_instance.sso is not in state")
+			}
+			c := accClient(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			_, err := c.GetPocketIdWiring(ctx, rs.Primary.ID)
+			if err == nil {
+				return fmt.Errorf("the PocketID wiring for instance %s still exists after destroy", rs.Primary.ID)
+			}
+			var apiErr *client.APIError
+			if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
+				return fmt.Errorf("checking the disconnected wiring for instance %s: %w", rs.Primary.ID, err)
+			}
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{
+				Config:          ssoConfig("v1"),
+				ConfigVariables: ssoVars,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("fluxvale_instance.sso", "status", "running"),
+					resource.TestCheckResourceAttr("fluxvale_pocket_id_sso.sso", "rotate_secret_on", "v1"),
+					resource.TestCheckResourceAttrSet("fluxvale_pocket_id_sso.sso", "pocket_id_client_id"),
+					resource.TestCheckResourceAttrSet("fluxvale_pocket_id_sso.sso", "pocket_id_secret_id"),
+					resource.TestCheckResourceAttrSet("fluxvale_pocket_id_sso.sso", "wired_at"),
+					checkWiring,
+				),
+			},
+			{
+				Config:          ssoConfig("v2"),
+				ConfigVariables: ssoVars,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("fluxvale_pocket_id_sso.sso", "rotate_secret_on", "v2"),
+					checkWiring,
+				),
+			},
+			{
+				// Destroy ONLY the wiring: the instance stays, so the
+				// 404 below can only come from the resource's Delete.
+				Config:          instanceOnlyConfig,
+				ConfigVariables: ssoVars,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("fluxvale_instance.sso", "status", "running"),
+					checkDisconnected,
+				),
+			},
+		},
 	})
 }
