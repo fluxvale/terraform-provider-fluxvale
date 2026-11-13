@@ -78,16 +78,14 @@ survives re-ordering and new releases.
 
 ## Install the providers (once)
 
-This module composes two providers, so it needs the
-[filesystem mirror](../../docs/guides/install.md) setup. With
-`dev_overrides` alone, `tofu init` queries the registry for the
-unpublished fluxvale provider and fails on that lookup (cloudflare
-itself installs fine) — the mirror is what makes init fully green:
-download the release zip + the versioned `*_SHA256SUMS` (+
-`*_SHA256SUMS.sig`), verify, drop the zip into
-`~/.tfplugins-mirror`, point `~/.tofurc` at it — docs/guides/install.md
-§1–3 walks it (this repo's releases ship from `v0.2.0` on; the
-monorepo's historical `tf-v0.1.x` releases stay where they were).
+This module composes two providers, and both install from their
+registries: plain `tofu init` pulls fluxvale and cloudflare.
+
+For an offline or air-gapped run, the fluxvale zips also install from a
+[filesystem mirror](../../docs/guides/install.md): download the release
+zip + the versioned `*_SHA256SUMS` (+ `*_SHA256SUMS.sig`), verify, drop
+the zip into `~/.tfplugins-mirror`, point `~/.tofurc` at it — §1–3
+walks it.
 
 ## Run and verify
 

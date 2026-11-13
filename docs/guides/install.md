@@ -24,11 +24,10 @@ and verify YOUR line of the sums — a single-platform download can't
 check the whole set:
 
 ```sh
-grep <your-zip> terraform-provider-fluxvale_0.3.0_SHA256SUMS | sha256sum -c -
-# e.g. grep terraform-provider-fluxvale_0.3.0_linux_amd64.zip terraform-provider-fluxvale_0.3.0_SHA256SUMS | sha256sum -c -
-#      macOS: … | shasum -a 256 -c -
-gpg --verify terraform-provider-fluxvale_0.3.0_SHA256SUMS.sig terraform-provider-fluxvale_0.3.0_SHA256SUMS   # after importing the public key:
-# gpg --import https://github.com/fluxvale/terraform-provider-fluxvale/raw/main/terraform-provider-signing.asc
+zip=terraform-provider-fluxvale_0.3.0_linux_amd64.zip   # your platform's zip
+grep "$zip" terraform-provider-fluxvale_0.3.0_SHA256SUMS | sha256sum -c -   # macOS: shasum -a 256 -c -
+gpg --fetch-keys https://github.com/fluxvale/terraform-provider-fluxvale/raw/main/terraform-provider-signing.asc
+gpg --verify terraform-provider-fluxvale_0.3.0_SHA256SUMS.sig terraform-provider-fluxvale_0.3.0_SHA256SUMS
 ```
 
 ## 2. Lay out the filesystem mirror
@@ -121,5 +120,5 @@ release, and the live listing at
 [registry.terraform.io/fluxvale/fluxvale](https://registry.terraform.io/providers/fluxvale/fluxvale/latest).
 The mirror recipe above remains the fallback for pinned or offline
 installs (the compatibility contract in
-[compatibility.md](compatibility.md) is what makes version upgrades
-non-breaking).
+[compatibility.md](compatibility.md) keeps the stable names above
+non-breaking across upgrades).
