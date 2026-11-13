@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -218,6 +219,7 @@ data "fluxvale_instance" "b_by_id" {
 	if !strings.Contains(plan, "5 to add") {
 		t.Fatalf("plan did not add the five resources:\n%s", plan)
 	}
+	assertSecretNotInPlan(t, work, secretOne)
 	runTofu(clipath, "apply", "tfplan")
 
 	// The instance id from the applied state — every env step below
@@ -299,9 +301,13 @@ data "fluxvale_instance" "b_by_id" {
 	}
 	assertSecretKeys := func(want ...string) {
 		t.Helper()
-		raw, ok := instanceAttrs("b")["secret_env_vars_keys"].([]any)
-		if !ok && len(want) > 0 {
-			t.Fatalf("secret_env_vars_keys = %#v, want %v", instanceAttrs("b")["secret_env_vars_keys"], want)
+		rawAny, present := instanceAttrs("b")["secret_env_vars_keys"]
+		if !present {
+			t.Fatalf("secret_env_vars_keys is absent from state, want %v", want)
+		}
+		raw, ok := rawAny.([]any)
+		if !ok {
+			t.Fatalf("secret_env_vars_keys = %#v (null?), want the list %v", rawAny, want)
 		}
 		got := make([]string, 0, len(raw))
 		for _, v := range raw {
@@ -389,11 +395,26 @@ data "fluxvale_instance" "b_by_id" {
 			byID["slug"], bySlug["slug"])
 	}
 
-	// Change SMOKE, add ADDED, remove DROP, and rotate the secret by
-	// bumping the version — one in-place merge PATCH re-sends every
-	// secret key.
+	// Version-only rotation: no env change, no other attribute — the
+	// integer alone must produce the one-change plan and re-send the
+	// secret.
+	writeModule("  env_vars    = { SMOKE = \"1\", DROP = \"bye\" }\n" + secretBlock(secretTwo, 2))
+	assertEnvPlan(runTofu(clipath, "plan", "-out=tfplan"))
+	assertSecretNotInPlan(t, work, secretTwo)
+	runTofu(clipath, "apply", "tfplan")
+	assertCleanPlan("version-only rotation")
+	assertSecretNotInState(secretOne)
+	assertSecretNotInState(secretTwo)
+	assertSecretKeys("SECRET")
+	if id := instanceBID(); id != idBefore {
+		t.Fatalf("instance b id changed across a version-only rotation: %q -> %q", idBefore, id)
+	}
+
+	// Change SMOKE and ADDED and remove DROP; the secret is unchanged
+	// (same version), so this PATCH must not re-send it.
 	writeModule("  env_vars    = { SMOKE = \"2\", ADDED = \"yes\" }\n" + secretBlock(secretTwo, 2))
 	assertEnvPlan(runTofu(clipath, "plan", "-out=tfplan"))
+	assertSecretNotInPlan(t, work, secretTwo)
 	runTofu(clipath, "apply", "tfplan")
 	assertCleanPlan("rotation")
 	assertSecretNotInState(secretOne)
@@ -430,7 +451,7 @@ data "fluxvale_instance" "b_by_id" {
 		countSuffix("PATCH", "/exposure", 1),
 		countSuffix("PATCH", "/always-on", 1),
 		countSuffix("PATCH", "/deploy", 3),
-		countSuffix("PATCH", "/env", 2),
+		countSuffix("PATCH", "/env", 3),
 		countSuffix("POST", "/backup-setting", 1),
 		countExact("POST", "/api/v1/access-gateways", 1),
 		countContains("POST", "/attachments", 1),
@@ -450,7 +471,7 @@ data "fluxvale_instance" "b_by_id" {
 	fake.wantCreateAttrs(t, "smoke-c", "cpu_cores", "0.5", "memory_mb", "256", "storage_gb", "1")
 	envVars := fattrs(t, fake.createNamed(t, "smoke-b"))["env_vars"]
 	if m, ok := envVars.(map[string]any); !ok || m["SMOKE"] != "1" || m["SECRET"] != secretOne {
-		t.Fatalf("instance b create env_vars = %#v, want SMOKE=1 and the secret merged", envVars)
+		t.Fatalf("instance b create env_vars keys = %v, want SMOKE=1 and the secret merged", keysOfAnyAny(m))
 	}
 
 	// The exposure PATCH carried the planned value — the private
@@ -470,11 +491,12 @@ data "fluxvale_instance" "b_by_id" {
 			envPatches = append(envPatches, r)
 		}
 	}
-	if len(envPatches) != 2 {
-		t.Fatalf("env PATCH count = %d, want 2", len(envPatches))
+	if len(envPatches) != 3 {
+		t.Fatalf("env PATCH count = %d, want 3", len(envPatches))
 	}
-	wantEnvPatch(t, envPatches[0], map[string]string{"SMOKE": "2", "ADDED": "yes", "SECRET": secretTwo}, []string{"DROP"})
-	wantEnvPatch(t, envPatches[1], map[string]string{}, []string{"ADDED", "SECRET", "SMOKE"})
+	wantEnvPatch(t, envPatches[0], map[string]string{"SECRET": secretTwo}, nil)
+	wantEnvPatch(t, envPatches[1], map[string]string{"SMOKE": "2", "ADDED": "yes"}, []string{"DROP"})
+	wantEnvPatch(t, envPatches[2], map[string]string{}, []string{"ADDED", "SECRET", "SMOKE"})
 
 	// The attach POST paired the private instance's actual id.
 	fake.wantAttachInstance(t, "smoke-b")
@@ -1160,6 +1182,31 @@ func (f *smokeFake) wantActionAttrs(t *testing.T, method, action string, pairs .
 		return
 	}
 	t.Fatalf("no %s request for action %q among the recorded traffic", method, action)
+}
+
+// assertSecretNotInPlan greps the saved plan artifact: a write-only
+// value must not appear in it. Only the count is printed.
+func assertSecretNotInPlan(t *testing.T, work, value string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(work, "tfplan"))
+	if err != nil {
+		t.Fatalf("read tfplan: %v", err)
+	}
+	count := bytes.Count(raw, []byte(value))
+	t.Logf("grep -c secret tfplan = %d", count)
+	if count != 0 {
+		t.Fatalf("secret value appears %d time(s) in the saved plan — write-only leaked", count)
+	}
+}
+
+// keysOfAnyAny names a decoded map's keys without printing values.
+func keysOfAnyAny(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // wantEnvPatch asserts one merge PATCH carried the exact set/remove

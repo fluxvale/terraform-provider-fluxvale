@@ -701,8 +701,13 @@ func TestUpdateEnvUnknownPlanWarnsAndSkips(t *testing.T) {
 			f.instanceGets = []scriptedResponse{script(200, runningDoc)}
 
 			state := envBase(t, map[string]string{"OLD": "1"})
+			state.SecretEnvVarsVersion = types.Int64Value(1)
+			state.SecretEnvVarsKeys = secretKeysList([]string{"OLD_SECRET"})
 			plan := state
 			plan.EnvVars = tc.plan
+			// A rotation bundled with the unknown env must not be
+			// consumed without being sent.
+			plan.SecretEnvVarsVersion = types.Int64Value(2)
 
 			diags := &diag.Diagnostics{}
 			updateInstance(context.Background(), f.testClient(), &plan, &state, diags)
@@ -712,6 +717,12 @@ func TestUpdateEnvUnknownPlanWarnsAndSkips(t *testing.T) {
 			}
 			if got := diags.Warnings()[0].Summary(); got != "Instance environment not updated" {
 				t.Errorf("warning summary = %q, want the env skip", got)
+			}
+			if !plan.SecretEnvVarsVersion.Equal(state.SecretEnvVarsVersion) {
+				t.Errorf("version after an env skip = %v, want the prior %v", plan.SecretEnvVarsVersion, state.SecretEnvVarsVersion)
+			}
+			if keys := listOf(t, plan.SecretEnvVarsKeys); !reflect.DeepEqual(keys, []string{"OLD_SECRET"}) {
+				t.Errorf("keys after an env skip = %v, want the prior list", keys)
 			}
 
 			// No merge PATCH — the final read is the only traffic.

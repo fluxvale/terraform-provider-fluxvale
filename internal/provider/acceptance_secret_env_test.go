@@ -7,10 +7,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,25 +21,30 @@ import (
 
 // TestAccInstanceSecretEnv is the real-wire proof for write-only
 // secrets (#764): apply a secret, prove the value is absent from
-// terraform.tfstate, rotate with a version bump and read the running
-// app's environment, then remove the key and watch it disappear.
+// terraform.tfstate and the saved plan, rotate with a version bump and
+// read the running app's own reported environment, then remove the key
+// and watch it disappear.
 //
-// The value travels as a sensitive variable, never a config literal,
-// and every assertion reports key names or counts only — a leaked
-// value in a failure message is itself a bug.
+// The running-app proof is Vikunja's /api/v1/info, whose
+// auth.local.registration_enabled is env-derived and not persisted.
+// No cluster credentials are needed, so the nightly acceptance lane
+// proves rotation and removal too.
 //
-// The running-app proof needs cluster read access and skips without
-// TF_ACC_KUBECTL_CONTEXT (CI's acceptance lane has the API token but
-// not the staging kubeconfig). Everything else runs with the normal
-// acceptance env.
+// Values travel as sensitive variables, never config literals, and
+// every assertion reports key names or counts only — a leaked value in
+// a failure message is itself a bug.
 func TestAccInstanceSecretEnv(t *testing.T) {
 	if os.Getenv("TF_ACC") == "" {
 		t.Skip("TF_ACC not set — the acceptance lane runs nightly/tags/dispatch, never per-PR (wallet cost)")
 	}
-
-	const address = "fluxvale_instance.secret"
-	secretOne := accRandomSecret(t)
-	secretTwo := accRandomSecret(t)
+	const (
+		address = "fluxvale_instance.secret"
+		regKey  = "VIKUNJA_SERVICE_ENABLEREGISTRATION"
+		regOn   = "true"
+		regOff  = "false"
+	)
+	secretValueOne := accRandomSecret(t)
+	secretValueTwo := accRandomSecret(t)
 
 	var id string
 	checkID := func(s *terraform.State) error {
@@ -63,17 +68,17 @@ func TestAccInstanceSecretEnv(t *testing.T) {
 		CheckDestroy:             accInstancesGone(t),
 		Steps: []resource.TestStep{
 			{
-				Config: accSecretEnvConfig(`  secret_env_vars = { ACC_SECRET = var.secret_value }
-  secret_env_vars_version = 1`),
-				ConfigVariables: accSecretVars(t, secretOne),
+				Config:          accSecretEnvConfig(true, accSecretBlock(regOn, 1)),
+				ConfigVariables: accSecretVars(t, secretValueOne),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(address, "status", "running"),
-					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.#", "1"),
+					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.#", "2"),
 					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.0", "ACC_SECRET"),
+					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.1", regKey),
 					resource.TestCheckNoResourceAttr(address, "secret_env_vars.ACC_SECRET"),
 					checkID,
-					accStateHasNoSecret(t, address, secretOne),
-					accRunningEnvIs(t, address, "ACC_SECRET", secretOne),
+					accStateHasNoSecret(t, address, secretValueOne),
+					accRunningRegistrationIs(t, address, true),
 				),
 			},
 			{
@@ -81,51 +86,41 @@ func TestAccInstanceSecretEnv(t *testing.T) {
 				// platform's rolling restart cannot surge. Stop first,
 				// rotate (the env PATCH writes the Secret while
 				// stopped), then start onto the new environment.
-				Config: accSecretEnvConfig(`  running = false
-  secret_env_vars = { ACC_SECRET = var.secret_value }
-  secret_env_vars_version = 2`),
-				ConfigVariables: accSecretVars(t, secretTwo),
+				Config:          accSecretEnvConfig(false, accSecretBlock(regOff, 2)),
+				ConfigVariables: accSecretVars(t, secretValueTwo),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(address, "status", "stopped"),
-					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.#", "1"),
-					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.0", "ACC_SECRET"),
-					// The first value must not survive in state either.
-					accStateHasNoSecret(t, address, secretOne),
-					accStateHasNoSecret(t, address, secretTwo),
+					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.#", "2"),
+					accStateHasNoSecret(t, address, secretValueOne),
+					accStateHasNoSecret(t, address, secretValueTwo),
 					checkID,
 				),
 			},
 			{
-				Config: accSecretEnvConfig(`  running = true
-  secret_env_vars = { ACC_SECRET = var.secret_value }
-  secret_env_vars_version = 2`),
-				ConfigVariables: accSecretVars(t, secretTwo),
+				Config:          accSecretEnvConfig(true, accSecretBlock(regOff, 2)),
+				ConfigVariables: accSecretVars(t, secretValueTwo),
 				Check: resource.ComposeTestCheckFunc(
-					accRunningEnvIs(t, address, "ACC_SECRET", secretTwo),
+					accRunningRegistrationIs(t, address, false),
 					accWaitStatus(t, address, "running"),
 					checkID,
 				),
 			},
 			{
-				Config: accSecretEnvConfig(`  running = false
-  secret_env_vars = {}
-  secret_env_vars_version = 3`),
-				ConfigVariables: accSecretVars(t, secretTwo),
+				Config:          accSecretEnvConfig(false, "  secret_env_vars = {}\n  secret_env_vars_version = 3"),
+				ConfigVariables: accSecretVars(t, secretValueTwo),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(address, "status", "stopped"),
 					resource.TestCheckResourceAttr(address, "secret_env_vars_keys.#", "0"),
-					accStateHasNoSecret(t, address, secretOne),
-					accStateHasNoSecret(t, address, secretTwo),
+					accStateHasNoSecret(t, address, secretValueOne),
+					accStateHasNoSecret(t, address, secretValueTwo),
 					checkID,
 				),
 			},
 			{
-				Config: accSecretEnvConfig(`  running = true
-  secret_env_vars = {}
-  secret_env_vars_version = 3`),
-				ConfigVariables: accSecretVars(t, secretTwo),
+				Config:          accSecretEnvConfig(true, "  secret_env_vars = {}\n  secret_env_vars_version = 3"),
+				ConfigVariables: accSecretVars(t, secretValueTwo),
 				Check: resource.ComposeTestCheckFunc(
-					accRunningEnvAbsent(t, address, "ACC_SECRET"),
+					accRunningRegistrationIs(t, address, true),
 					accWaitStatus(t, address, "running"),
 					checkID,
 				),
@@ -134,12 +129,19 @@ func TestAccInstanceSecretEnv(t *testing.T) {
 	})
 }
 
-func accSecretEnvConfig(secretBlock string) string {
-	return accVarDecls + `
-variable "app_slug" {
-  type = string
+// The values here are deliberately not secret: the state-grep proof
+// uses ACC_SECRET (random per run); registration is the running app's
+// observable signal and is not persisted by Vikunja.
+func accSecretBlock(registration string, version int) string {
+	return fmt.Sprintf(`  secret_env_vars = {
+    ACC_SECRET                         = var.secret_value
+    VIKUNJA_SERVICE_ENABLEREGISTRATION = %q
+  }
+  secret_env_vars_version = %d`, registration, version)
 }
 
+func accSecretEnvConfig(running bool, secretBlock string) string {
+	return accVarDecls + fmt.Sprintf(`
 variable "secret_value" {
   type      = string
   sensitive = true
@@ -151,28 +153,29 @@ variable "organization" {
 }
 
 data "fluxvale_app_versions" "test" {
-  app = var.app_slug
+  app = "vikunja"
 }
 
 resource "fluxvale_instance" "secret" {
   name         = "acc-secret-env"
   organization = var.organization != "" ? var.organization : null
-  app         = var.app_slug
-  app_version = data.fluxvale_app_versions.test.app_versions[0].version
-  cpu_cores   = 0.5
-  memory_mb   = 256
-  storage_gb  = 1
+  app          = "vikunja"
+  app_version  = data.fluxvale_app_versions.test.app_versions[0].version
+  cpu_cores    = 0.5
+  memory_mb    = 512
+  storage_gb   = 5
 
   env_vars = { ACC_PLAIN = "1" }
 
-` + secretBlock + `
+  running = %t
+%s
 }
-`
+`, running, secretBlock)
 }
 
 func accSecretVars(t *testing.T, secret string) config.Variables {
 	t.Helper()
-	v := accAppVars(t)
+	v := accVars(t)
 	v["secret_value"] = config.StringVariable(secret)
 	v["organization"] = config.StringVariable(os.Getenv("TF_ACC_ORGANIZATION"))
 	return v
@@ -244,119 +247,49 @@ func accWaitStatus(t *testing.T, address, want string) resource.TestCheckFunc {
 	}
 }
 
-// accRunningEnvIs reads the running app's environment through the
-// cluster: poll printenv inside the pod until it matches, so a
-// terminating old pod cannot mask the new environment. The value
-// never enters a log or error.
-func accRunningEnvIs(t *testing.T, address, key, want string) resource.TestCheckFunc {
+// accRunningRegistrationIs is the running-app proof: Vikunja reports
+// auth.local.registration_enabled on the public /api/v1/info route,
+// directly from its env. Polling covers the start/deploy window
+// without cluster access.
+func accRunningRegistrationIs(t *testing.T, address string, want bool) resource.TestCheckFunc {
 	t.Helper()
 	return func(s *terraform.State) error {
-		ns, ok := accInstanceNamespace(s, address)
+		rs, ok := s.RootModule().Resources[address]
 		if !ok {
-			return fmt.Errorf("%s has no namespace in state", address)
+			return fmt.Errorf("%s is not in state", address)
 		}
-		if !accHasKubectl() {
-			t.Logf("running-env proof skipped for %s — TF_ACC_KUBECTL_CONTEXT is unset", key)
-			return nil
+		slug := rs.Primary.Attributes["slug"]
+		if slug == "" {
+			return fmt.Errorf("%s has no slug in state", address)
 		}
-		if err := accWaitRunningEnv(ns, key, want); err != nil {
-			return err
-		}
-		t.Logf("running_env=%s matches the applied version", key)
-		return nil
-	}
-}
-
-func accRunningEnvAbsent(t *testing.T, address, key string) resource.TestCheckFunc {
-	t.Helper()
-	return func(s *terraform.State) error {
-		ns, ok := accInstanceNamespace(s, address)
-		if !ok {
-			return fmt.Errorf("%s has no namespace in state", address)
-		}
-		if !accHasKubectl() {
-			t.Logf("running-env removal proof skipped for %s — TF_ACC_KUBECTL_CONTEXT is unset", key)
-			return nil
-		}
-		if err := accWaitRunningEnvAbsent(ns, key); err != nil {
-			return err
-		}
-		t.Logf("running_env_absent=%s", key)
-		return nil
-	}
-}
-
-func accInstanceNamespace(s *terraform.State, address string) (string, bool) {
-	rs, ok := s.RootModule().Resources[address]
-	if !ok {
-		return "", false
-	}
-	ns := rs.Primary.Attributes["namespace"]
-	return ns, ns != ""
-}
-
-func accHasKubectl() bool {
-	return os.Getenv("TF_ACC_KUBECTL_CONTEXT") != ""
-}
-
-// accWaitRunningEnv polls the pod's own environment until it equals
-// the applied value. Rollout status is not used: a terminating old pod
-// can hold the Deployment's rollout open after the new pod is already
-// serving. The deadline is the proof window; only key names and pod
-// statuses appear in errors.
-func accWaitRunningEnv(ns, key, want string) error {
-	deadline := time.Now().Add(5 * time.Minute)
-	for time.Now().Before(deadline) {
-		if got, err := accKubectlPrintenvOptional(ns, key); err == nil && got == want {
-			return nil
-		}
-		time.Sleep(5 * time.Second)
-	}
-	return accRunningEnvTimeout(ns, key, false)
-}
-
-func accWaitRunningEnvAbsent(ns, key string) error {
-	deadline := time.Now().Add(5 * time.Minute)
-	empty := 0
-	for time.Now().Before(deadline) {
-		got, err := accKubectlPrintenvOptional(ns, key)
-		if err == nil && got == "" {
-			empty++
-			if empty >= 2 {
-				return nil
+		url := "https://" + slug + ".fluxvale.app/api/v1/info"
+		client := &http.Client{Timeout: 10 * time.Second}
+		deadline := time.Now().Add(5 * time.Minute)
+		last := false
+		for time.Now().Before(deadline) {
+			resp, err := client.Get(url)
+			if err == nil {
+				var body struct {
+					Auth struct {
+						Local struct {
+							RegistrationEnabled bool `json:"registration_enabled"`
+						} `json:"local"`
+					} `json:"auth"`
+				}
+				decErr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body)
+				resp.Body.Close()
+				if decErr == nil {
+					last = body.Auth.Local.RegistrationEnabled
+					if last == want {
+						t.Logf("running_env=VIKUNJA_SERVICE_ENABLEREGISTRATION matches the applied version")
+						return nil
+					}
+				}
 			}
-		} else {
-			empty = 0
+			time.Sleep(5 * time.Second)
 		}
-		time.Sleep(5 * time.Second)
+		return fmt.Errorf("running app did not report the applied registration setting (last %t, want %t)", last, want)
 	}
-	return accRunningEnvTimeout(ns, key, true)
-}
-
-func accRunningEnvTimeout(ns, key string, wantAbsent bool) error {
-	ctx := os.Getenv("TF_ACC_KUBECTL_CONTEXT")
-	status, _ := exec.Command("kubectl", "--context", ctx, "-n", ns, "get", "pods",
-		"-o", "custom-columns=NAME:.metadata.name,PHASE:.status.phase,READY:.status.containerStatuses[*].ready,REASON:.status.containerStatuses[*].state.waiting.reason").CombinedOutput()
-	what := "did not reach the applied value"
-	if wantAbsent {
-		what = "did not drop the removed key"
-	}
-	return fmt.Errorf("running app environment %s %s in %s; pods: %s",
-		key, what, ns, strings.TrimSpace(string(status)))
-}
-
-// accKubectlPrintenvOptional returns "" when the variable is absent —
-// the shell form keeps a missing variable from masquerading as a
-// kubectl failure.
-func accKubectlPrintenvOptional(ns, key string) (string, error) {
-	ctx := os.Getenv("TF_ACC_KUBECTL_CONTEXT")
-	cmd := exec.Command("kubectl", "--context", ctx, "-n", ns, "exec", "deploy/app", "--",
-		"sh", "-c", `printenv "$1" || true`, "sh", key)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSuffix(string(out), "\n"), nil
 }
 
 func accRandomSecret(t *testing.T) string {

@@ -343,6 +343,31 @@ func TestUpdateSecretUnknownWarnsAndKeepsState(t *testing.T) {
 	}
 }
 
+// A secret unknown at apply time skips the whole merge: an env_vars
+// change in the same plan must stay in state as the prior value, not
+// as a change the server never saw.
+func TestUpdateSecretUnknownKeepsEnvInState(t *testing.T) {
+	f := newFakeAPI(t)
+	f.instanceGets = []scriptedResponse{script(200, runningDoc)}
+
+	state := secretEnvBase(t, map[string]string{"API_KEY": "old"}, 3, []string{"API_KEY"})
+	plan := state
+	plan.EnvVars = secretMap(t, map[string]string{"PLAIN": "new"})
+	plan.SecretEnvVars = types.MapUnknown(types.StringType)
+	plan.SecretEnvVarsVersion = types.Int64Value(4)
+
+	diags := new(diag.Diagnostics)
+	updateInstance(context.Background(), f.testClient(), &plan, &state, diags)
+	assertNoErrors(t, diags)
+	assertRequestList(t, f.all(), "GET /api/v1/instances/inst-1")
+	if got := envMapOf(t, plan.EnvVars); !reflect.DeepEqual(got, map[string]string{"PLAIN": "same"}) {
+		t.Errorf("env_vars after a secret skip = %v, want the prior state", got)
+	}
+	if !plan.SecretEnvVarsVersion.Equal(state.SecretEnvVarsVersion) {
+		t.Errorf("version after a secret skip = %v, want the prior %v", plan.SecretEnvVarsVersion, state.SecretEnvVarsVersion)
+	}
+}
+
 // The wrapper must never write the write-only map to state, while the
 // computed key list and version do ride state.
 func TestUpdateWrapperKeepsSecretsOutOfState(t *testing.T) {
@@ -381,6 +406,116 @@ func TestUpdateWrapperKeepsSecretsOutOfState(t *testing.T) {
 	if keys := listOf(t, got.SecretEnvVarsKeys); !reflect.DeepEqual(keys, []string{"API_KEY"}) {
 		t.Errorf("state keys = %v, want [API_KEY]", keys)
 	}
+}
+
+// Moving a key from secret_env_vars to env_vars without a bump is
+// refused: the write-only map cannot show the move, and silently
+// leaving the old secret key tracked would later remove it from the
+// app even though the config still sets it as a plain env var.
+func TestUpdateSecretToEnvMoveWithoutBumpIsRefused(t *testing.T) {
+	f := newFakeAPI(t)
+
+	state := secretEnvBase(t, map[string]string{"MOVE": "old"}, 1, []string{"MOVE"})
+	plan := state
+	plan.EnvVars = secretMap(t, map[string]string{"PLAIN": "same", "MOVE": "new"})
+	plan.SecretEnvVars = secretMap(t, map[string]string{})
+	plan.SecretEnvVarsVersion = types.Int64Value(1)
+
+	diags := new(diag.Diagnostics)
+	if updateInstance(context.Background(), f.testClient(), &plan, &state, diags) {
+		t.Fatal("updateInstance reported the instance gone")
+	}
+	assertError(t, diags, "keys changed without a version bump", `"MOVE"`)
+	for _, r := range f.all() {
+		if r.method == http.MethodPatch {
+			t.Errorf("unexpected PATCH %s after a key-set change without a bump", r.path)
+		}
+	}
+}
+
+// The same move WITH a bump is one set, never a remove — the running
+// app keeps the key, now as a plain env var.
+func TestUpdateSecretToEnvMoveWithBumpSetsOnly(t *testing.T) {
+	f := newFakeAPI(t)
+	f.instanceGets = []scriptedResponse{script(200, runningDoc)}
+
+	state := secretEnvBase(t, map[string]string{"MOVE": "old"}, 1, []string{"MOVE"})
+	plan := state
+	plan.EnvVars = secretMap(t, map[string]string{"PLAIN": "same", "MOVE": "new"})
+	plan.SecretEnvVars = secretMap(t, map[string]string{})
+	plan.SecretEnvVarsVersion = types.Int64Value(2)
+
+	diags := new(diag.Diagnostics)
+	updateInstance(context.Background(), f.testClient(), &plan, &state, diags)
+	assertNoErrors(t, diags)
+
+	reqs := f.all()
+	assertRequestList(t, reqs,
+		"PATCH /api/v1/instances/inst-1/env",
+		"GET /api/v1/instances/inst-1",
+	)
+	assertEnvMerge(t, reqs[0], map[string]string{"MOVE": "new"}, nil)
+	if keys := listOf(t, plan.SecretEnvVarsKeys); len(keys) != 0 {
+		t.Errorf("secret_env_vars_keys = %v, want empty after the move", keys)
+	}
+}
+
+// Moving env_vars -> secret_env_vars WITH a bump is one set too.
+func TestUpdateEnvToSecretMoveWithBumpSetsOnly(t *testing.T) {
+	f := newFakeAPI(t)
+	f.instanceGets = []scriptedResponse{script(200, runningDoc)}
+
+	state := envBase(t, map[string]string{"PLAIN": "same", "MOVE": "old"})
+	state.SecretEnvVarsVersion = types.Int64Null()
+	state.SecretEnvVarsKeys = types.ListNull(types.StringType)
+	plan := state
+	plan.EnvVars = secretMap(t, map[string]string{"PLAIN": "same"})
+	plan.SecretEnvVars = secretMap(t, map[string]string{"MOVE": "new"})
+	plan.SecretEnvVarsVersion = types.Int64Value(1)
+
+	diags := new(diag.Diagnostics)
+	updateInstance(context.Background(), f.testClient(), &plan, &state, diags)
+	assertNoErrors(t, diags)
+
+	reqs := f.all()
+	assertRequestList(t, reqs,
+		"PATCH /api/v1/instances/inst-1/env",
+		"GET /api/v1/instances/inst-1",
+	)
+	assertEnvMerge(t, reqs[0], map[string]string{"MOVE": "new"}, nil)
+	if keys := listOf(t, plan.SecretEnvVarsKeys); !reflect.DeepEqual(keys, []string{"MOVE"}) {
+		t.Errorf("secret_env_vars_keys = %v, want [MOVE]", keys)
+	}
+}
+
+func TestUpdateNewSecretKeyWithoutBumpIsRefused(t *testing.T) {
+	f := newFakeAPI(t)
+
+	state := secretEnvBase(t, map[string]string{"KEEP": "one"}, 1, []string{"KEEP"})
+	plan := state
+	plan.SecretEnvVars = secretMap(t, map[string]string{"KEEP": "one", "NEW": "two"})
+	plan.SecretEnvVarsVersion = types.Int64Value(1)
+
+	diags := new(diag.Diagnostics)
+	if updateInstance(context.Background(), f.testClient(), &plan, &state, diags) {
+		t.Fatal("updateInstance reported the instance gone")
+	}
+	assertError(t, diags, "keys changed without a version bump", `"NEW"`)
+}
+
+func TestUpdateRemovedSecretKeyWithoutBumpIsRefused(t *testing.T) {
+	f := newFakeAPI(t)
+
+	state := secretEnvBase(t, map[string]string{"KEEP": "one", "DROP": "two"}, 1, []string{"DROP", "KEEP"})
+	plan := state
+	plan.SecretEnvVars = secretMap(t, map[string]string{"KEEP": "one"})
+	plan.SecretEnvVarsVersion = types.Int64Value(1)
+
+	diags := new(diag.Diagnostics)
+	if updateInstance(context.Background(), f.testClient(), &plan, &state, diags) {
+		t.Fatal("updateInstance reported the instance gone")
+	}
+	assertError(t, diags, "keys changed without a version bump", `"DROP"`)
 }
 
 // --- helpers ---------------------------------------------------------

@@ -180,6 +180,55 @@ func mergeEnvMaps(env, secret map[string]string) (map[string]string, diag.Diagno
 	return out, diags
 }
 
+// sameKeys compares two sorted key slices.
+func sameKeys(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// keyDelta renders added/removed key names for a diagnostic — never
+// values.
+func keyDelta(configured, prior []string) string {
+	before := make(map[string]bool, len(prior))
+	for _, key := range prior {
+		before[key] = true
+	}
+	after := make(map[string]bool, len(configured))
+	for _, key := range configured {
+		after[key] = true
+	}
+	added := make([]string, 0)
+	removed := make([]string, 0)
+	for _, key := range configured {
+		if !before[key] {
+			added = append(added, key)
+		}
+	}
+	for _, key := range prior {
+		if !after[key] {
+			removed = append(removed, key)
+		}
+	}
+	parts := make([]string, 0, 2)
+	if len(added) > 0 {
+		parts = append(parts, "added: "+joinKeys(added))
+	}
+	if len(removed) > 0 {
+		parts = append(parts, "removed: "+joinKeys(removed))
+	}
+	if len(parts) == 0 {
+		return "the key sets differ"
+	}
+	return strings.Join(parts, "; ")
+}
+
 // mapOverlap returns the sorted intersection of two key sets.
 func mapOverlap(left, right map[string]string) []string {
 	overlap := make([]string, 0)

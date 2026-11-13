@@ -27,9 +27,9 @@ lives next door in
 - **Encrypted state and plan** — the root module declares OpenTofu's
   `encryption` block with `enforced = true`, keyed by
   `TF_VAR_state_passphrase` from the keychain or a secret manager.
-  This stack needs OpenTofu 1.13+; Terraform has no native equivalent
-  (see the provider's [Secrets in Terraform](https://github.com/fluxvale/terraform-provider-fluxvale/blob/main/docs/guides/secrets.md)
-  guide for the marker fallback).
+  This stack needs OpenTofu 1.13+ and provider 0.4.0+ (release pending); Terraform has no
+  native state encryption (see the provider's [Secrets in Terraform](https://github.com/fluxvale/terraform-provider-fluxvale/blob/main/docs/guides/secrets.md)
+  guide for the write-only input and backend-encryption path).
 - **Write-only secrets** — `instances.<name>.secret_env_vars` plus
   `secret_env_vars_version` ride the same in-place env PATCH as
   `env_vars`, but their values never enter state or plan files. Bump
@@ -118,10 +118,11 @@ instances = {
 ```
 
 The value never appears in `terraform.tfstate` or the saved plan. Prove
-it after an apply:
+it after an apply — on this stack the state is encrypted, so read the
+decrypted form:
 
 ```sh
-grep -c 'the-secret-value' terraform.tfstate
+tofu state pull | grep -c 'the-secret-value'
 # 0
 ```
 
@@ -149,6 +150,10 @@ silently writes plaintext. Existing unencrypted state needs the one-time
 `unencrypted` fallback migration in the provider's
 [Secrets in Terraform](https://github.com/fluxvale/terraform-provider-fluxvale/blob/main/docs/guides/secrets.md)
 guide. Losing the passphrase makes the state unrecoverable — back it up.
+
+The write-only attributes need provider 0.4.0+ (the release containing
+#764, pending) and OpenTofu 1.13+ or Terraform 1.12+. The `enc:v1:` marker is an
+accepted design, not a shipped fallback — do not rely on it yet.
 
 ## Run and verify
 
@@ -180,7 +185,7 @@ Verified when:
   in-place churn on registered custom-domain rows.
 - `tofu apply` completes; `tofu output` prints the public URLs and
   the gateway host.
-- `grep -c '<the-secret>' terraform.tfstate` prints `0`; the state file
+- `tofu state pull | grep -c '<the-secret>'` prints `0`; the state file
   starts with OpenTofu's encryption metadata, and the plan file is
   encrypted too.
 - The panel shows the instances running, backups rows enabled, and

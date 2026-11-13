@@ -13,20 +13,21 @@ and the encrypted-state baseline that backs it up.
 | `sensitive = true` | Redacts values in console output | The plaintext still lands in state and plan files |
 | State and plan encryption | State and plan files at rest, including the backend copy | A value read from a plan by someone with the key |
 | `secret_env_vars` (write-only) | Values never enter state or plan at all | The plaintext in your `.tf`/`.tfvars` if you write it there |
-| `enc:v1:` marker (ADR-0053) | Ciphertext in state, git, and the platform database | A compromised platform process — the trust boundary |
+| `enc:v1:` marker (ADR-0053, design only) | Ciphertext in state, git, and the platform database — once built | A compromised platform process — the trust boundary |
 
 **The baseline is encryption. The strongest input is write-only. The
-marker is the portable fallback.** `sensitive` alone is a display
-setting, not a security boundary: it only means Terraform hides the
-value in human-readable output while writing the plaintext to the state
-file.
+marker is the portable fallback design, not shipped yet.** `sensitive`
+alone is a display setting, not a security boundary: it only means
+Terraform hides the value in human-readable output while writing the
+plaintext to the state file.
 
-## The encrypted-state quickstart
+## The OpenTofu encrypted-state quickstart
 
-OpenTofu encrypts state and plan files client-side (Terraform has no
-native equivalent; see [KMS variants](#kms-variants) for a managed-key
-setup). Keep the passphrase in your keychain or a secret manager, never
-in the repository:
+OpenTofu encrypts state and plan files client-side. Terraform has no
+native equivalent, so a Terraform 1.12+ user gets the write-only input
+but must rely on the backend's encryption at rest (S3 SSE, GCS CMEK,
+and so on) instead of this block. Keep the passphrase in your keychain
+or a secret manager, never in the repository:
 
 ```sh
 # macOS Keychain
@@ -138,9 +139,15 @@ Change the value and bump the integer:
 
 The bump is what Terraform can see; the provider re-sends every key in
 the map and the platform rolls the running app onto the new
-environment. If the app's resource quota cannot accommodate a second
-pod during that rolling restart, stop it first: set `running = false`,
-apply the bump, then set `running = true` and apply again.
+environment. Bump on **any** value or key-set change — adding a key,
+removing one, or moving one between `env_vars` and
+`secret_env_vars`. A key-set change with an unchanged version is refused
+with the key names, because the provider cannot tell it from a stale
+map.
+
+If the app's resource quota cannot accommodate a second pod during the
+rolling restart, stop it first: set `running = false`, apply the bump,
+then set `running = true` and apply again.
 
 ### Remove a key
 
@@ -161,15 +168,24 @@ bump — both converge:
   secret_env_vars_version = 4
 ```
 
-Do not remove a key without bumping the version: the write-only map
-change is invisible to Terraform, so there is no plan to apply.
+Do not remove or add a key without bumping the version: the write-only
+map change is invisible to Terraform, and the provider refuses a
+key-set change it cannot see a bump for.
 
 ### Prove the value is not in state
 
-After an apply:
+After an apply, with an unencrypted state:
 
 ```sh
 grep -c 'the-secret-value' terraform.tfstate
+# expected: 0
+```
+
+With encryption enabled the file is ciphertext, so a grep of the file is
+meaningless (it returns 0 either way). Read the decrypted state instead:
+
+```sh
+tofu state pull | grep -c 'the-secret-value'
 # expected: 0
 ```
 
@@ -181,15 +197,19 @@ values do not. The API never echoes environment values either.
 The additions are additive. Existing configurations need no change and
 keep working on the provider's existing Terraform floor. Only the new
 attributes require **Terraform 1.12+ or OpenTofu 1.13+**, because
-write-only attributes are a newer protocol feature. On an older CLI,
-leave `secret_env_vars`, `secret_env_vars_version`, and
+write-only attributes are a newer protocol feature, and they need a
+provider release that contains #764 (0.4.0 or later; not yet
+tagged — this repository does not release itself). On an older CLI, leave
+`secret_env_vars`, `secret_env_vars_version`, and
 `secret_env_vars_keys` out of the configuration and use `env_vars` plus
-state encryption (or the marker fallback) instead.
+state encryption at rest instead.
 
 Import leaves `secret_env_vars_keys` null: the API cannot tell the
 provider which existing environment keys were secret. The first apply
 that sets `secret_env_vars` sends the full secret set and records the
-key list.
+key list. Pre-existing secret env keys are therefore not tracked and
+cannot be removed by the provider until they are set through
+`secret_env_vars` at least once.
 
 ### What write-only does not protect
 
@@ -209,22 +229,26 @@ process environment; the state and plan files cannot.
 
 ## The `enc:v1:` marker fallback
 
-The platform also defines a portable marker, `enc:v1:<kid>:<payload>`
+The platform has an accepted design for a portable marker,
+`enc:v1:<kid>:<payload>`
 ([ADR-0053](https://github.com/fluxvale/fluxvale/blob/main/docs/adr/00053-terraform-secret-env.md)).
-The CLI encrypts a value with the organization's public key and prints a
-marker; the platform opens it at deploy and never echoes the plaintext.
-The marker is opaque to Terraform, so it works on older Terraform
-versions and in GitOps flows where a write-only apply is not available.
+The CLI would encrypt a value with the organization's public key and
+print a marker; the platform would open it at deploy and never echo the
+plaintext. The marker is opaque to Terraform, so it would work on older
+Terraform versions and in GitOps flows where a write-only apply is not
+available.
 
-It is the fallback, not the default: it leaves ciphertext in state and
-in HCL, while `secret_env_vars` leaves nothing. Use write-only inputs
-where the CLI supports them, and the marker where it does not.
+**It is not built yet.** The ADR's platform and CLI slices are deferred;
+do not rely on `fluxvale secrets encrypt` or paste an `enc:v1:` value
+today. When it ships it will be the fallback, not the default: it leaves
+ciphertext in state and in HCL, while `secret_env_vars` leaves nothing.
 
-## KMS variants
+## KMS variants (OpenTofu)
 
 A passphrase is the simplest key provider. A managed key removes the
 shared secret from the operator's environment; use a dedicated key per
-state file and enable automatic rotation.
+state file and enable automatic rotation. These key providers are
+OpenTofu-only.
 
 AWS KMS:
 

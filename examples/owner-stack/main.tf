@@ -40,7 +40,7 @@ terraform {
   required_providers {
     fluxvale = {
       source  = "registry.terraform.io/fluxvale/fluxvale"
-      version = ">= 0.3" # in-place env_vars needs 0.3.0+; installs from the public registry
+      version = ">= 0.4" # 0.4.0+ ships write-only secret_env_vars (#764); in-place env_vars needs 0.3.0+
     }
     cloudflare = {
       source  = "cloudflare/cloudflare"

@@ -639,9 +639,12 @@ func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceMo
 	if plan.EnvVars.IsUnknown() {
 		diags.AddWarning(summary, fmt.Sprintf(
 			"instance %s: env_vars is unknown at apply time — skipped the in-place environment update; the keys this resource manages are left untouched.", id))
-		// The wrapper writes the plan back to state; an unknown map
-		// cannot ride state, so keep the prior state's map instead.
+		// The wrapper writes the plan back to state; nothing was sent,
+		// so every env-related state field must keep its prior value —
+		// including a bumped secret version (otherwise the rotation is
+		// consumed without ever reaching the app).
 		plan.EnvVars = state.EnvVars
+		plan.SecretEnvVarsVersion = state.SecretEnvVarsVersion
 		plan.SecretEnvVarsKeys = state.SecretEnvVarsKeys
 		return
 	}
@@ -654,6 +657,7 @@ func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceMo
 				diags.AddWarning(summary, fmt.Sprintf(
 					"instance %s: env_vars[%q] is unknown at apply time — skipped the in-place environment update; the keys this resource manages are left untouched.", id, key))
 				plan.EnvVars = state.EnvVars
+				plan.SecretEnvVarsVersion = state.SecretEnvVarsVersion
 				plan.SecretEnvVarsKeys = state.SecretEnvVarsKeys
 				return
 			}
@@ -675,6 +679,7 @@ func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceMo
 	if plan.SecretEnvVarsVersion.IsUnknown() || plan.SecretEnvVars.IsUnknown() {
 		diags.AddWarning(summary, fmt.Sprintf(
 			"instance %s: secret_env_vars is unknown at apply time — skipped the in-place environment update; the secret keys this resource manages are left untouched.", id))
+		plan.EnvVars = state.EnvVars
 		plan.SecretEnvVarsVersion = state.SecretEnvVarsVersion
 		plan.SecretEnvVarsKeys = state.SecretEnvVarsKeys
 		return
@@ -698,6 +703,25 @@ func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceMo
 			return
 		}
 		desiredKeys = sortedKeys(wantSecret)
+	} else {
+		// The version is the only visible secret signal; a key-set
+		// change without a bump would otherwise be consumed
+		// inconsistently (a move from secret to env could later be
+		// removed as a stale secret). Refuse it and name the keys.
+		configKeys, d := secretEnvMap(ctx, plan.SecretEnvVars)
+		diags.Append(d...)
+		if diags.HasError() {
+			return
+		}
+		configured := sortedKeys(configKeys)
+		if !sameKeys(configured, desiredKeys) {
+			diags.AddError(
+				"secret_env_vars keys changed without a version bump",
+				fmt.Sprintf("the managed secret key set changed (%s). Bump secret_env_vars_version so the provider can apply the key-set change; a write-only map cannot produce a diff on its own.",
+					keyDelta(configured, desiredKeys)),
+			)
+			return
+		}
 	}
 
 	// A key lives in exactly one of the two maps. ValidateConfig
@@ -743,6 +767,11 @@ func applyEnvVars(ctx context.Context, pd *providerData, plan, state *instanceMo
 		desired[key] = true
 	}
 	for _, key := range secretKeysFromList(ctx, state.SecretEnvVarsKeys, diags) {
+		// A key still present in env_vars is never removed — the user
+		// moved it, not dropped it.
+		if _, stillEnv := want[key]; stillEnv {
+			continue
+		}
 		if !desired[key] {
 			remove[key] = true
 		}
