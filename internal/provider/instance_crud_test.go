@@ -220,6 +220,7 @@ func TestInstanceSchemaContract(t *testing.T) {
 	want := []string{
 		"organization", "organization_id", "name", "app_version_id", "app", "app_version",
 		"cpu_cores", "memory_mb", "storage_gb", "env_vars",
+		"secret_env_vars", "secret_env_vars_version", "secret_env_vars_keys",
 		"running", "always_on", "exposure",
 		"id", "slug", "namespace", "status", "port", "image", "deployed_at",
 	}

@@ -7,12 +7,40 @@
 # nothing applies until the owner fills them in and runs it himself.
 
 terraform {
-  required_version = ">= 1.6.0" # optional()/one() want >= 1.4; 1.6 is the tested floor
+  # 1.13 is the OpenTofu floor for write-only env inputs and the
+  # encryption block below. Prefer OpenTofu for this stack: Terraform
+  # has no native state/plan encryption.
+  required_version = ">= 1.13.0" # optional()/one() want >= 1.4; 1.13 is this stack's floor
+
+  # State and plan encryption, enforced: a missing passphrase refuses
+  # the run instead of silently writing plaintext. Supply the key from
+  # the keychain or a secret manager:
+  #   export TF_VAR_state_passphrase="$(security find-generic-password -w -s fluxvale-state)"
+  # The passphrase never belongs in terraform.tfvars or git.
+  encryption {
+    key_provider "pbkdf2" "state" {
+      passphrase = var.state_passphrase
+    }
+
+    method "aes_gcm" "state" {
+      keys = key_provider.pbkdf2.state
+    }
+
+    state {
+      method   = method.aes_gcm.state
+      enforced = true
+    }
+
+    plan {
+      method   = method.aes_gcm.state
+      enforced = true
+    }
+  }
 
   required_providers {
     fluxvale = {
       source  = "registry.terraform.io/fluxvale/fluxvale"
-      version = ">= 0.3" # in-place env_vars needs 0.3.0+; installs from the public registry
+      version = ">= 0.4" # 0.4.0+ ships write-only secret_env_vars (#764); in-place env_vars needs 0.3.0+
     }
     cloudflare = {
       source  = "cloudflare/cloudflare"
@@ -90,6 +118,13 @@ resource "fluxvale_instance" "apps" {
 
   # Write-only (kept verbatim in state; the API never echoes it).
   env_vars = each.value.env_vars
+
+  # Write-only and never in state or plan: the version is the rotation
+  # signal. Bump it whenever a value changes; remove a key and bump it
+  # to converge the removal. The computed key list is the reviewer's
+  # view of what this resource manages.
+  secret_env_vars         = each.value.secret_env_vars
+  secret_env_vars_version = each.value.secret_env_vars_version
 
   lifecycle {
     precondition {
