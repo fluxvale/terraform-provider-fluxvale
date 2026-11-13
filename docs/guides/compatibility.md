@@ -15,6 +15,7 @@ done silently in 0.x:
   - `fluxvale_instance_backups`
   - `fluxvale_access_gateway`
   - `fluxvale_custom_domain`
+  - `fluxvale_pocket_id_sso`
   - `fluxvale_apps` (data source — the catalog)
   - `fluxvale_app_versions` (data source)
   - `fluxvale_instance` (data source — read by id or slug)
