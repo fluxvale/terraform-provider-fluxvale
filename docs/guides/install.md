@@ -4,12 +4,12 @@ page_title: "Installing the provider"
 
 # Installing the provider
 
-Manual-first until the registry listing goes live ([ADR-0019](https://github.com/fluxvale/fluxvale/blob/main/docs/adr/00019-machine-first-api-cli-mcp.md)
-Am. 4 and its extraction follow-up in the monorepo's ADR index): the
-provider installs from this repo's GitHub Releases into a local
-filesystem mirror — or, for dev work, straight off a freshly built
-binary via `dev_overrides`. Once the listing is live, `terraform
-init` / `tofu init` replaces this whole page.
+The provider is on the public registry at
+[registry.terraform.io/fluxvale/fluxvale](https://registry.terraform.io/providers/fluxvale/fluxvale/latest):
+`terraform init` / `tofu init` pulls the signed provider from there.
+For offline, air-gapped, or pinned installs, it also installs from this
+repo's GitHub Releases into a local filesystem mirror — or, for dev
+work, straight off a freshly built binary via `dev_overrides`.
 
 ## 1. Download a release
 
@@ -117,10 +117,9 @@ the debugger-attached variant (`go run . -debug`).
 This repo IS the registry repository — extracted for exactly that
 ([ADR-0051](https://github.com/fluxvale/fluxvale/blob/main/docs/adr/00051-tfprovider-repo-extraction.md)):
 plain `vX.Y.Z` tags, GPG-signed checksums, the registry manifest per
-release. What remains is the listing itself — a manual org-connect
-step on the registry side. Once it goes live, `terraform init` /
-`tofu init` replaces this whole page, and the mirror recipe above
-becomes the fallback for pinned, offline, or pre-listing installs
-(the compatibility contract in
-[compatibility.md](compatibility.md) is what makes that switch
+release, and the live listing at
+[registry.terraform.io/fluxvale/fluxvale](https://registry.terraform.io/providers/fluxvale/fluxvale/latest).
+The mirror recipe above remains the fallback for pinned or offline
+installs (the compatibility contract in
+[compatibility.md](compatibility.md) is what makes version upgrades
 non-breaking).
