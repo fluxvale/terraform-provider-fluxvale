@@ -96,6 +96,7 @@ write-only value cannot produce a plan diff on its own:
 variable "database_url" {
   type      = string
   sensitive = true
+  ephemeral = true
 }
 
 resource "fluxvale_instance" "app" {
@@ -116,7 +117,9 @@ resource "fluxvale_instance" "app" {
 
 The provider merges `secret_env_vars` into the same in-place environment
 PATCH as `env_vars`. The two maps are disjoint: a key present in both is
-a plan-time error (the diagnostic names the key, never a value).
+a plan-time error when both maps are known (the diagnostic names the
+key, never a value); if `secret_env_vars` is unknown at plan time the
+check runs at apply, and an overlap fails the update.
 
 `secret_env_vars_keys` is the computed, sorted list of key names the
 resource manages. It carries no values, so a plan or a review can show
@@ -214,18 +217,22 @@ cannot be removed by the provider until they are set through
 ### What write-only does not protect
 
 The value is still plaintext in your configuration if you write it as a
-literal in `.tf` or `.tfvars`. Use a sensitive variable fed by your CI
-secret store or a secret manager:
+literal in `.tf` or `.tfvars`. Use a sensitive, ephemeral variable fed by
+your CI secret store or a secret manager:
 
 ```hcl
 variable "database_url" {
   type      = string
   sensitive = true
+  ephemeral = true
 }
 ```
 
-`terraform plan` and `terraform apply` can read the value from the
-process environment; the state and plan files cannot.
+`ephemeral = true` keeps the variable value out of a saved plan as well;
+`sensitive` alone does not. Applying a saved plan then requires supplying
+the variable again (`TF_VAR_database_url=…`), because an ephemeral value
+is never stored. `terraform plan` and `terraform apply` can read the
+value from the process environment; the state and plan files cannot.
 
 ## The `enc:v1:` marker fallback
 
