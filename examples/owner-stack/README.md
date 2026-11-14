@@ -27,7 +27,7 @@ lives next door in
 - **Encrypted state and plan** — the root module declares OpenTofu's
   `encryption` block with `enforced = true`, keyed by
   `TF_VAR_state_passphrase` from the keychain or a secret manager.
-  This stack needs OpenTofu 1.13+ and provider 0.4.0+ (release pending); Terraform has no
+  This stack needs OpenTofu 1.13+ and provider 0.4.0+; Terraform has no
   native state encryption (see the provider's [Secrets in Terraform](https://github.com/fluxvale/terraform-provider-fluxvale/blob/main/docs/guides/secrets.md)
   guide for the write-only input and backend-encryption path).
 - **Write-only secrets** — `instances.<name>.secret_env_vars` plus
@@ -151,8 +151,7 @@ silently writes plaintext. Existing unencrypted state needs the one-time
 [Secrets in Terraform](https://github.com/fluxvale/terraform-provider-fluxvale/blob/main/docs/guides/secrets.md)
 guide. Losing the passphrase makes the state unrecoverable — back it up.
 
-The write-only attributes need provider 0.4.0+ (the release containing
-#764, pending) and OpenTofu 1.13+ or Terraform 1.12+. The `enc:v1:` marker is an
+The write-only attributes need provider 0.4.0+ and OpenTofu 1.13+ or Terraform 1.12+. The `enc:v1:` marker is an
 accepted design, not a shipped fallback — do not rely on it yet.
 
 ## Run and verify

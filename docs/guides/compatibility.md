@@ -38,8 +38,8 @@ write-only attribute. Plaintext values still live in state.
 change, and the provider's existing Terraform floor is unchanged.
 
 The new attributes require **Terraform 1.12+ or OpenTofu 1.13+**,
-because they use the protocol's write-only input support, and a provider
-release containing #764 (0.4.0 or later, pending release). On an older CLI, leave the three attributes out;
+because they use the protocol's write-only input support, and provider
+0.4.0 or later. On an older CLI, leave the three attributes out;
 `env_vars` plus state encryption at rest keeps working exactly as
 before. The `enc:v1:` marker is an accepted design, not a shipped
 fallback.

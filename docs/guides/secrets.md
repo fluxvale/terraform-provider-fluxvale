@@ -200,9 +200,8 @@ values do not. The API never echoes environment values either.
 The additions are additive. Existing configurations need no change and
 keep working on the provider's existing Terraform floor. Only the new
 attributes require **Terraform 1.12+ or OpenTofu 1.13+**, because
-write-only attributes are a newer protocol feature, and they need a
-provider release that contains #764 (0.4.0 or later; not yet
-tagged — this repository does not release itself). On an older CLI, leave
+write-only attributes are a newer protocol feature, and they need
+provider 0.4.0 or later. On an older CLI, leave
 `secret_env_vars`, `secret_env_vars_version`, and
 `secret_env_vars_keys` out of the configuration and use `env_vars` plus
 state encryption at rest instead.
