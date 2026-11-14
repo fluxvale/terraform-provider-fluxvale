@@ -24,10 +24,10 @@ and verify YOUR line of the sums — a single-platform download can't
 check the whole set:
 
 ```sh
-zip=terraform-provider-fluxvale_0.3.0_linux_amd64.zip   # your platform's zip
-grep "$zip" terraform-provider-fluxvale_0.3.0_SHA256SUMS | sha256sum -c -   # macOS: shasum -a 256 -c -
+zip=terraform-provider-fluxvale_0.4.0_linux_amd64.zip   # your platform's zip
+grep "$zip" terraform-provider-fluxvale_0.4.0_SHA256SUMS | sha256sum -c -   # macOS: shasum -a 256 -c -
 gpg --fetch-keys https://github.com/fluxvale/terraform-provider-fluxvale/raw/main/terraform-provider-signing.asc
-gpg --verify terraform-provider-fluxvale_0.3.0_SHA256SUMS.sig terraform-provider-fluxvale_0.3.0_SHA256SUMS
+gpg --verify terraform-provider-fluxvale_0.4.0_SHA256SUMS.sig terraform-provider-fluxvale_0.4.0_SHA256SUMS
 ```
 
 ## 2. Lay out the filesystem mirror
@@ -41,10 +41,10 @@ filename), and the os/arch names are the registry's vocabulary:
   registry.terraform.io/
     fluxvale/
       fluxvale/
-        terraform-provider-fluxvale_0.3.0_linux_amd64.zip
-        terraform-provider-fluxvale_0.3.0_linux_arm64.zip
-        terraform-provider-fluxvale_0.3.0_darwin_arm64.zip
-        terraform-provider-fluxvale_0.3.0_windows_amd64.zip
+        terraform-provider-fluxvale_0.4.0_linux_amd64.zip
+        terraform-provider-fluxvale_0.4.0_linux_arm64.zip
+        terraform-provider-fluxvale_0.4.0_darwin_arm64.zip
+        terraform-provider-fluxvale_0.4.0_windows_amd64.zip
 ```
 
 Drop the downloaded zips in unchanged — this packed layout is

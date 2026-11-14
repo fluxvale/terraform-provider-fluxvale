@@ -55,7 +55,7 @@ resource "fluxvale_instance" "memos" {
 
 `id`, `slug`, `namespace`, `status`, `port`, `image`, `deployed_at`, `organization_id`, `app_version_id` — the wire's echo, computed. `secret_env_vars_keys` is the provider-maintained sorted list of managed secret key names.
 
-The platform rolls a running instance after an env change. If the app's quota cannot fit a second pod during that rollout, set `running = false`, apply the bump, then set `running = true` and apply again — otherwise the rollout can mark the instance `error`. Write-only inputs need Terraform 1.12+ or OpenTofu 1.13+, in a provider release containing #764 (0.4.0 or later, pending release).
+The platform rolls a running instance after an env change. If the app's quota cannot fit a second pod during that rollout, set `running = false`, apply the bump, then set `running = true` and apply again — otherwise the rollout can mark the instance `error`. Write-only inputs need Terraform 1.12+ or OpenTofu 1.13+, in provider 0.4.0 or later.
 
 ## Import
 
