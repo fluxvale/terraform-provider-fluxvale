@@ -24,6 +24,8 @@ provider page, per-resource and per-data-source pages, and the
   instances, backups, custom domains
 - [`examples/personal-stack`](examples/personal-stack) — the
   single-instance teaching example
+- [`examples/team-org`](examples/team-org) — a team organization and
+  its first app, showing the dependency edge
 
 ## Releases
 

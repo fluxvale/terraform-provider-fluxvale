@@ -83,6 +83,17 @@ type fakeAPI struct {
 	pocketIDRotateStatus     int
 	pocketIDRotateDoc        string
 
+	// Organization slice (#784): create/read/update/delete, with the
+	// detail and slug reads scripted (the 404/403 arms).
+	orgPostStatus   int
+	orgPostDoc      string
+	orgGets         []scriptedResponse // GET /organizations/:id
+	orgBySlugGets   []scriptedResponse // GET /organizations/by-slug/:slug
+	orgPatchStatus  int
+	orgPatchDoc     string
+	orgDeleteStatus int
+	orgDeleteDoc    string
+
 	t *testing.T
 }
 
@@ -126,6 +137,51 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 	mux.HandleFunc("/api/v1/organizations", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r, nil)
 		f.json(w, http.StatusOK, f.orgsDoc)
+	})
+	mux.HandleFunc("POST /api/v1/organizations", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.record(r, body)
+		status := f.orgPostStatus
+		if status == 0 {
+			status = http.StatusCreated
+		}
+		f.json(w, status, f.orgPostDoc)
+	})
+	// The org detail/import/update/delete paths. A subtree handler,
+	// not method patterns: Go's ServeMux calls
+	// GET /organizations/{org}/access-gateway and
+	// GET /organizations/by-slug/{slug} equally specific (neither
+	// wins), so the real gateway/domain handlers above keep their
+	// method patterns and this dispatcher owns the rest.
+	mux.HandleFunc("/api/v1/organizations/", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/by-slug/"):
+			f.record(r, nil)
+			f.scriptedGet(w, r, &f.orgBySlugGets)
+		case r.Method == http.MethodGet:
+			f.record(r, nil)
+			f.scriptedGet(w, r, &f.orgGets)
+		case r.Method == http.MethodPatch:
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.record(r, body)
+			status := f.orgPatchStatus
+			if status == 0 {
+				status = http.StatusOK
+			}
+			f.json(w, status, f.orgPatchDoc)
+		case r.Method == http.MethodDelete:
+			f.record(r, nil)
+			status := f.orgDeleteStatus
+			if status == 0 {
+				status = http.StatusOK
+			}
+			f.json(w, status, f.orgDeleteDoc)
+		default:
+			f.record(r, nil)
+			f.json(w, http.StatusNotFound, `{"errors":[{"status":"404"}]}`)
+		}
 	})
 	mux.HandleFunc("/api/v1/apps", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r, nil)

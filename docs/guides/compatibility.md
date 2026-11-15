@@ -11,6 +11,7 @@ done silently in 0.x:
 - The `FLUXVALE_PAT` environment variable
 - The documented `api_url` default: `https://fluxvale.com`
 - Resource/data-source **type names** — the v0 set:
+  - `fluxvale_organization`
   - `fluxvale_instance`
   - `fluxvale_instance_backups`
   - `fluxvale_access_gateway`

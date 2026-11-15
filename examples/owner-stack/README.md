@@ -57,7 +57,7 @@ instance.
 
 | Value | Where it comes from | Goes where |
 | --- | --- | --- |
-| `FLUXVALE_PAT` | fluxvale.com → Settings → Developer → API tokens (scopes: `instances:write backups:write gateways:write catalog:read`) | `export FLUXVALE_PAT=fvpat_…` — **only** the environment, never a file, never pasted into the repo or notes |
+| `FLUXVALE_PAT` | fluxvale.com → Settings → Developer → API tokens (scopes: `instances:write backups:write gateways:write catalog:read organizations:read organizations:write`) | `export FLUXVALE_PAT=fvpat_…` — **only** the environment, never a file, never pasted into the repo or notes |
 | `state_passphrase` | your keychain or secret manager — a long passphrase (16+ chars) for state/plan encryption | `export TF_VAR_state_passphrase=…` — never in `terraform.tfvars`, never in git |
 | `cloudflare_api_token` | Cloudflare dashboard → API tokens (R2 edit on the account) | `terraform.tfvars` |
 | `cloudflare_account_id` | Cloudflare dashboard → account overview | `terraform.tfvars` |

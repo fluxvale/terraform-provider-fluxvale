@@ -160,6 +160,7 @@ func TestProviderRegistrations(t *testing.T) {
 	p := New("test")()
 
 	wantResources := map[string]bool{
+		"fluxvale_organization":     false,
 		"fluxvale_instance":         false,
 		"fluxvale_instance_backups": false,
 		"fluxvale_access_gateway":   false,

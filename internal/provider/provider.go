@@ -162,6 +162,7 @@ func (p *fluxvaleProvider) Configure(ctx context.Context, req provider.Configure
 // Resources returns the provider's resource set.
 func (p *fluxvaleProvider) Resources(ctx context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
+		NewOrganizationResource,
 		NewInstanceResource,
 		NewBackupsResource,
 		NewGatewayResource,

@@ -14,8 +14,9 @@
 #
 # Floor: TF_ACC_PAT alone runs the suite, and the catalog + instance
 # classes are the nightly proof. Mint per the platform's deployment
-# docs (scopes instances:write backups:write gateways:write +
-# catalog:read); the preflight below fails loud smoke-style until it
+# docs (scopes instances:write backups:write gateways:write
+# catalog:read organizations:read organizations:write); the preflight
+# below fails loud smoke-style until it
 # exists, so a nightly REDS rather than green-skips through proving
 # nothing.
 #
@@ -113,7 +114,7 @@ jobs:
         env:
           TF_ACC_PAT: ${{ secrets.TF_ACC_PAT }}
         run: |
-          test -n "$TF_ACC_PAT" || { echo "::error::TF_ACC_PAT is not set — mint per the platform's deployment docs (scopes instances:write backups:write gateways:write + catalog:read; the org must have paid once for backups)"; exit 1; }
+          test -n "$TF_ACC_PAT" || { echo "::error::TF_ACC_PAT is not set — mint per the platform's deployment docs (scopes instances:write backups:write gateways:write catalog:read organizations:read organizations:write; the org must have paid once for backups)"; exit 1; }
 
       - name: Run the acceptance tests
         env:
