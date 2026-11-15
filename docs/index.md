@@ -51,8 +51,9 @@ Data sources:
 - [`fluxvale_apps`](data-sources/apps.md) — the catalog
 - [`fluxvale_app_versions`](data-sources/app_versions.md) — one app's versions
 - [`fluxvale_instance`](data-sources/instance.md) — read an instance by id or slug
+- [`fluxvale_domain_delegation`](data-sources/domain_delegation.md) — the DNS records a custom domain needs before registration
 
-Guides: [Installing the provider](guides/install.md) · [Secrets in Terraform](guides/secrets.md) · [Compatibility contract](guides/compatibility.md) · [The owner stack example](https://github.com/fluxvale/terraform-provider-fluxvale/tree/main/examples/owner-stack) · [The personal-stack example](https://github.com/fluxvale/terraform-provider-fluxvale/tree/main/examples/personal-stack) · [The team-org example](https://github.com/fluxvale/terraform-provider-fluxvale/tree/main/examples/team-org)
+Guides: [Installing the provider](guides/install.md) · [Secrets in Terraform](guides/secrets.md) · [Compatibility contract](guides/compatibility.md) · [The owner stack example](https://github.com/fluxvale/terraform-provider-fluxvale/tree/main/examples/owner-stack) · [The personal-stack example](https://github.com/fluxvale/terraform-provider-fluxvale/tree/main/examples/personal-stack) · [The team-org example](https://github.com/fluxvale/terraform-provider-fluxvale/tree/main/examples/team-org) · [The Cloudflare stack example](https://github.com/fluxvale/terraform-provider-fluxvale/tree/main/examples/cloudflare-stack)
 
 ## Upgrading to v0.5.0
 

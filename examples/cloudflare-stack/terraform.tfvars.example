@@ -1,0 +1,10 @@
+api_url        = "https://staging.fluxvale.com"
+zone_name      = "example.com"
+custom_domain  = "apps.example.com"
+tailnet_domain = "example.ts.net"
+
+# Never put tokens in this file for a real run:
+#   export FLUXVALE_PAT='...'
+#   export CLOUDFLARE_API_TOKEN='...'
+#   export TF_VAR_tailscale_api_token='...'   # an ephemeral sensitive variable
+#   export TF_VAR_tailscale_auth_key='...'    # only when creating the gateway

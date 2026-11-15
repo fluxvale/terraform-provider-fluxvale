@@ -11,8 +11,19 @@ Register lands the row `pending` and mints the wildcard Certificate in the same 
 ## Example Usage
 
 ```hcl
-resource "fluxvale_custom_domain" "apps" {
+data "fluxvale_domain_delegation" "apps" {
   domain = "apps.example.com"
+}
+
+# Create the returned CNAME at your DNS host first (Cloudflare:
+# proxied = false); see the data source page and the cloudflare-stack
+# example. The private lane needs one _acme-challenge record and no
+# host record. This resource has no dns_records attribute: the data
+# source is the only pre-registration source.
+
+resource "fluxvale_custom_domain" "apps" {
+  domain                = "apps.example.com"
+  wait_for_verification = true
 }
 ```
 
@@ -29,7 +40,7 @@ resource "fluxvale_custom_domain" "apps" {
 ## Notes
 
 
-- **`verified` is NOT resolution.** Promotion mints the domain's serving arms, but the split-DNS claim — the tailnet-side route that makes the name ANSWER — has no API surface yet. This resource registers, verifies (DNS-01), and tears down, nothing more.
+- **`verified` is NOT resolution by itself.** Promotion means the wildcard Certificate issued (DNS-01). The name answers only after the org's gateway claims it: saving the gateway's Tailscale API token claims the verified domains it can, and a later verification or attach claims too. The claim joins the apply that creates the gateway or bumps `rotate_api_token_on` — order the gateway after this resource so the verified row exists first. Off tailnet the name does not resolve.
 - `resume` is deliberately not exposed. A `suspended` domain is legacy state: domains are free, nothing current suspends one — the state and its resume survive for old rows only. Watch `state`.
 - Names are unique platform-wide, across ALL organizations: the duplicate 400 surfaces verbatim (the name may belong to another org). The platform canonicalizes (trim + downcase); the provider sends the canonical name on the wire and decides replacement on canonical forms, so any config casing converges — the plan and state keep the form you wrote. Only a genuinely different canonical name replaces (hand-edited state included — the canonical row is the truth).
 - `organization` accepts id or slug; the plan normalizes a set value to the resolved id, so a slug config converges with an imported id. Only a genuinely different organization replaces.

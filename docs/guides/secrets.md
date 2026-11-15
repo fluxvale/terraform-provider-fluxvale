@@ -313,3 +313,15 @@ the endpoint and token):
 
 The rest of the `method`/`state`/`plan` blocks are identical to the
 passphrase example.
+
+## Gateway API token
+
+`fluxvale_access_gateway.api_token` is a single write-only string with
+the same mechanics as `secret_env_vars`: Terraform 1.12+ or OpenTofu
+1.13+, a provider release containing the attribute, and no value in
+state or plan. Because a write-only value cannot produce a diff,
+`rotate_api_token_on` is the rotation signal — bump it whenever the
+tailnet API key changes, and set `api_token` in the same apply. State
+keeps `token_set_at` (the rotation clock) and the non-secret
+`claimed_domains` list. With no declarative token, leave both attributes
+unset and use the panel's Access settings.

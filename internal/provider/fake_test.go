@@ -71,6 +71,12 @@ type fakeAPI struct {
 	domainGets         []scriptedResponse // GET /access-domains/:id
 	domainDeleteStatus int
 	domainDeleteDoc    string
+	// fluxvale/fluxvale#783: the pre-registration delegation preview (bare JSON object).
+	domainDelegationStatus int
+	domainDelegationDoc    string
+	// fluxvale/fluxvale#783: PATCH /access-gateways/:id/api-token (the write-only save).
+	gatewayTokenStatus int
+	gatewayTokenDoc    string
 
 	// PocketID SSO slice (#731 T3): the connect/disconnect/rotate POSTs
 	// render flat generic-action bodies (statuses script the 400/404
@@ -124,6 +130,11 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		domainPostDoc:      domainPendingDoc,
 		domainDeleteStatus: http.StatusOK,
 		domainDeleteDoc:    domainDeleteDoc,
+
+		domainDelegationStatus: http.StatusOK,
+		domainDelegationDoc:    domainDelegationDoc,
+		gatewayTokenStatus:     http.StatusOK,
+		gatewayTokenDoc:        gatewayTokenDoc,
 
 		pocketIDConnectStatus:    http.StatusCreated,
 		pocketIDConnectDoc:       pocketIDWiringFlat,
@@ -380,6 +391,22 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		f.json(w, f.domainDeleteStatus, f.domainDeleteDoc)
 	})
 
+	// fluxvale/fluxvale#783: the row-free delegation preview the data source reads.
+	mux.HandleFunc("GET /api/v1/domain-delegations/{domain}", func(w http.ResponseWriter, r *http.Request) {
+		f.record(r, nil)
+		f.json(w, f.domainDelegationStatus, f.domainDelegationDoc)
+	})
+
+	// fluxvale/fluxvale#783: the write-only Tailscale API token save. The response is a
+	// JSON:API gateway row (the route's default_fields include the
+	// claim state and rotation stamp); the token itself never appears.
+	mux.HandleFunc("PATCH /api/v1/access-gateways/{id}/api-token", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.record(r, body)
+		f.json(w, f.gatewayTokenStatus, f.gatewayTokenDoc)
+	})
+
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Close)
 	return f
@@ -527,28 +554,60 @@ const (
 	gatewayCreateDoc = `{"data": {"id": "gw-1", "type": "access_gateway", "attributes": {
 		"organization_id": "org-1", "hostname": "fv-0a1b2c3d", "tailnet_domain": "example.ts.net",
 		"provider": "tailscale", "state": "provisioning", "status_message": null,
-		"monthly_cents": 500}}}`
+		"monthly_cents": 500, "api_token_set": false, "token_set_at": null,
+		"claimed_domains": []}}}`
 
 	gatewayProvisioningDoc = `{"data": {"id": "gw-1", "type": "access_gateway", "attributes": {
 		"organization_id": "org-1", "hostname": "fv-0a1b2c3d", "tailnet_domain": "example.ts.net",
 		"provider": "tailscale", "state": "provisioning", "status_message": null,
-		"monthly_cents": 500, "provisioned_at": null}}}`
+		"monthly_cents": 500, "provisioned_at": null, "api_token_set": false,
+		"token_set_at": null, "claimed_domains": []}}}`
 
 	gatewayActiveDoc = `{"data": {"id": "gw-1", "type": "access_gateway", "attributes": {
 		"organization_id": "org-1", "hostname": "fv-0a1b2c3d", "tailnet_domain": "example.ts.net",
 		"provider": "tailscale", "state": "active", "status_message": null,
-		"monthly_cents": 500, "provisioned_at": "2026-11-06T10:00:00Z"}}}`
+		"monthly_cents": 500, "provisioned_at": "2026-11-06T10:00:00Z",
+		"api_token_set": false, "token_set_at": null, "claimed_domains": []}}}`
+
+	// fluxvale/fluxvale#783: the real token PATCH response shape — the token itself never
+	// appears, and neither do tailnet_domain/provider (the route's pinned
+	// default_fields). The provider must not parse this body as a full
+	// row; it reads the singleton back for that.
+	gatewayTokenDoc = `{"data": {"id": "gw-1", "type": "access_gateway", "attributes": {
+		"organization_id": "org-1", "hostname": "fv-0a1b2c3d", "state": "active",
+		"status_message": null, "monthly_cents": 500,
+		"api_token_set": true, "token_set_at": "2026-11-15T10:00:00Z",
+		"claimed_domains": ["apps.customer.com"]}}}`
+
+	// The full row the singleton read returns after the save: the PATCH
+	// body's claim state plus the create-only fields mapGateway needs.
+	gatewayTokenFullDoc = `{"data": {"id": "gw-1", "type": "access_gateway", "attributes": {
+		"organization_id": "org-1", "hostname": "fv-0a1b2c3d", "tailnet_domain": "example.ts.net",
+		"provider": "tailscale", "state": "active", "status_message": null,
+		"monthly_cents": 500, "provisioned_at": "2026-11-06T10:00:00Z",
+		"api_token_set": true, "token_set_at": "2026-11-15T10:00:00Z",
+		"claimed_domains": ["apps.customer.com"]}}}`
 
 	// The access-domain rows: the pinned public field set — id rides
 	// the document, the attributes are exactly domain/kind/state/
 	// organization_id (cert_secret_ref is internal, never on the wire).
 	domainPendingDoc = `{"data": {"id": "dom-1", "type": "access_domain", "attributes": {
 		"domain": "apps.customer.com", "kind": "custom", "state": "pending",
-		"organization_id": "org-1"}}}`
+		"organization_id": "org-1",
+		"dns_records": [{"name": "_acme-challenge.apps.customer.com", "type": "CNAME",
+			"value": "0123456789abcdef0123456789abcdef.acme.fluxvale.app"}]}}}`
 
 	domainVerifiedDoc = `{"data": {"id": "dom-1", "type": "access_domain", "attributes": {
 		"domain": "apps.customer.com", "kind": "custom", "state": "verified",
-		"organization_id": "org-1"}}}`
+		"organization_id": "org-1",
+		"dns_records": [{"name": "_acme-challenge.apps.customer.com", "type": "CNAME",
+			"value": "0123456789abcdef0123456789abcdef.acme.fluxvale.app"}]}}}`
+
+	// fluxvale/fluxvale#783: the pre-registration preview body — a bare JSON object, one
+	// challenge CNAME.
+	domainDelegationDoc = `{"domain": "apps.customer.com",
+		"dns_records": [{"name": "_acme-challenge.apps.customer.com", "type": "CNAME",
+			"value": "0123456789abcdef0123456789abcdef.acme.fluxvale.app"}]}`
 
 	// The teardown DELETE's 200 renders the row flat (the generic
 	// action's shape — the id at the top level, no JSON:API envelope).
@@ -660,6 +719,8 @@ func testGateway(mutators ...func(*gatewayModel)) gatewayModel {
 		Organization:   types.StringNull(),
 		TailnetDomain:  types.StringValue("example.ts.net"),
 		AuthKey:        types.StringValue("tskey-test"),
+		APIToken:       types.StringNull(),
+		RotateAPIToken: types.StringNull(),
 		Instances:      types.SetNull(types.StringType),
 		ID:             types.StringNull(),
 		OrganizationID: types.StringNull(),
@@ -669,6 +730,8 @@ func testGateway(mutators ...func(*gatewayModel)) gatewayModel {
 		StatusMessage:  types.StringNull(),
 		MonthlyCents:   types.Int64Null(),
 		ProvisionedAt:  types.StringNull(),
+		TokenSetAt:     types.StringNull(),
+		ClaimedDomains: types.ListNull(types.StringType),
 	}
 	for _, m := range mutators {
 		m(&data)

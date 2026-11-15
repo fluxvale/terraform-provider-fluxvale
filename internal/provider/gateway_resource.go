@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/fluxvale/terraform-provider-fluxvale/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -52,6 +53,8 @@ type gatewayModel struct {
 	Organization   types.String `tfsdk:"organization"`
 	TailnetDomain  types.String `tfsdk:"tailnet_domain"`
 	AuthKey        types.String `tfsdk:"auth_key"`
+	APIToken       types.String `tfsdk:"api_token"`
+	RotateAPIToken types.String `tfsdk:"rotate_api_token_on"`
 	Instances      types.Set    `tfsdk:"instances"`
 	ID             types.String `tfsdk:"id"`
 	OrganizationID types.String `tfsdk:"organization_id"`
@@ -61,6 +64,8 @@ type gatewayModel struct {
 	StatusMessage  types.String `tfsdk:"status_message"`
 	MonthlyCents   types.Int64  `tfsdk:"monthly_cents"`
 	ProvisionedAt  types.String `tfsdk:"provisioned_at"`
+	TokenSetAt     types.String `tfsdk:"token_set_at"`
+	ClaimedDomains types.List   `tfsdk:"claimed_domains"`
 }
 
 func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
@@ -85,12 +90,11 @@ func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"`terraform apply -replace=…` (or re-add the resource).",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
-			// Optional rather than the framework's WriteOnly: write-only
-			// attributes need Terraform CLI ≥ 1.11 in every consumer and
-			// would forfeit the kept-verbatim-in-state semantics this
-			// provider documents for write-only fields (env_vars,
-			// secret_access_key). Same contract, cheaper: Optional +
-			// Sensitive + the create-time check below.
+			// Optional rather than the framework's WriteOnly: auth_key
+			// keeps its value in state (the panel's re-paste is the
+			// only rotation), the same wire-write-only contract as
+			// env_vars and secret_access_key. api_token is different:
+			// it is true WriteOnly because it must never enter state.
 			"auth_key": schema.StringAttribute{
 				Optional:  true,
 				Sensitive: true,
@@ -100,6 +104,27 @@ func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"state. Rotation has no API route (the panel's re-paste is the path), so changing it plans a " +
 					"replacement, and replacements are rejected.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+			},
+			"api_token": schema.StringAttribute{
+				Optional:  true,
+				Sensitive: true,
+				WriteOnly: true,
+				MarkdownDescription: "The Tailscale API access token the platform uses to claim verified custom domains " +
+					"on your tailnet. Mint it from a tailnet owner/admin account with the `dns`, `devices:routes`, and " +
+					"`devices:core:read` scopes; keys expire within 90 days. **Write-only:** Terraform never writes the " +
+					"value to state or plan, and the API never echoes it. On create it is sent once, after the gateway " +
+					"reaches `active`, and the save claims every verified domain in the organization. Because a write-only " +
+					"value cannot produce a plan diff, bump `rotate_api_token_on` to send the current token again. Requires " +
+					"Terraform 1.12+ or OpenTofu 1.13+ and a provider release containing this attribute; " +
+					"older CLIs leave it out and paste the token in the panel instead.",
+			},
+			"rotate_api_token_on": schema.StringAttribute{
+				Optional: true,
+				MarkdownDescription: "Rotation trigger for `api_token` — an arbitrary string (a date, a version, a nonce). " +
+					"Changing it re-sends the current `api_token` in place through the token PATCH; an unchanged value " +
+					"never re-sends, even though Terraform cannot see the write-only value. Set `api_token` whenever this " +
+					"changes. Null is valid: the gateway simply has no declarative token (an imported row manages " +
+					"attachments without one).",
 			},
 			"instances": schema.SetAttribute{
 				ElementType: types.StringType,
@@ -146,6 +171,17 @@ func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"provisioned_at": schema.StringAttribute{
 				Computed:    true,
 				Description: "When the cluster objects were provisioned (null until then).",
+			},
+			"token_set_at": schema.StringAttribute{
+				Computed: true,
+				Description: "When the Tailscale API token was last saved (null before the first save). The token value is " +
+					"never readable; watch this stamp and rotate before the key's 90-day expiry.",
+			},
+			"claimed_domains": schema.ListAttribute{
+				ElementType: types.StringType,
+				Computed:    true,
+				Description: "The custom domain names this gateway currently claims on the tailnet — the readable half of " +
+					"the claim registry (resolver IPs and tailnet data stay private). Empty until a verified domain is claimed.",
 			},
 		},
 	}
@@ -230,6 +266,41 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
+	// The API token is write-only: it lives in the configuration, not
+	// the planned state (Terraform nulls it there). Read it from Config
+	// for this apply only, and keep it in a local so the state writes
+	// below never carry it. A write-only value must be known by apply
+	// time — skipping an unknown silently would leave the gateway
+	// without a token and no diff to retry.
+	var apiToken string
+	rotateTrigger := data.RotateAPIToken
+	if req.Config.Schema != nil {
+		var config gatewayModel
+		resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if config.APIToken.IsUnknown() {
+			resp.Diagnostics.AddError(
+				"api_token must be known at apply time",
+				"The write-only token cannot be deferred to apply — use a known value (an ephemeral variable resolves "+
+					"before apply) and apply again.",
+			)
+			return
+		}
+		if !config.APIToken.IsNull() {
+			apiToken = config.APIToken.ValueString()
+		}
+		if !config.RotateAPIToken.IsUnknown() {
+			rotateTrigger = config.RotateAPIToken
+		}
+	}
+	if rotateTrigger.IsUnknown() {
+		rotateTrigger = types.StringNull()
+	}
+	data.APIToken = types.StringNull()
+	data.RotateAPIToken = rotateTrigger
+
 	pd := r.data(&resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
@@ -275,10 +346,42 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 	// post-POST stance): write what we know so every later failure —
 	// set conversion, wait timeout, attach refusal — leaves a tracked
 	// resource the next apply updates or forgets. mapGateway fills
-	// every computed field, so no unknowns remain to clear.
+	// every computed field, so no unknowns remain to clear. A pending
+	// token save keeps the trigger out of this write: if the save
+	// fails, the next apply must still see a trigger change and retry.
+	tokenPending := apiToken != ""
+	if tokenPending {
+		data.RotateAPIToken = types.StringNull()
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+
+	// The token save is the claim event (fluxvale/fluxvale#760, fluxvale/fluxvale#782): send it once on
+	// create, after the gateway serves. Waiting for `active` here means
+	// the claim sweep has a node to talk to; a gateway created before
+	// any domain exists is fine — a later verification or attach sweeps.
+	if tokenPending {
+		waitGatewayActive(ctx, pd, orgID, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		gw, err := pd.client.SetGatewayApiToken(ctx, orgID, data.ID.ValueString(), apiToken)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Unable to save the Tailscale API token",
+				fmt.Sprintf("gateway %s: %v", data.ID.ValueString(), err),
+			)
+			return
+		}
+		mapGateway(&data, gw)
+		data.RotateAPIToken = rotateTrigger
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
 	}
 
 	// Attach needs a serving gateway — create lands :provisioning and
@@ -468,6 +571,22 @@ func mapGateway(data *gatewayModel, gw client.AccessGateway) {
 	data.StatusMessage = types.StringPointerValue(gw.StatusMessage)
 	data.MonthlyCents = types.Int64Value(gw.MonthlyCents)
 	data.ProvisionedAt = types.StringPointerValue(gw.ProvisionedAt)
+	data.TokenSetAt = types.StringPointerValue(gw.TokenSetAt)
+	data.ClaimedDomains = stringListValue(gw.ClaimedDomains)
+}
+
+// stringListValue maps an optional string slice: nil is a null list
+// (an older server omits the field), empty is an empty list. Elements
+// are plain strings, so the must-variant cannot fail.
+func stringListValue(values []string) types.List {
+	if values == nil {
+		return types.ListNull(types.StringType)
+	}
+	elems := make([]attr.Value, len(values))
+	for i, value := range values {
+		elems[i] = types.StringValue(value)
+	}
+	return types.ListValueMust(types.StringType, elems)
 }
 
 func (r *gatewayResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -500,6 +619,29 @@ func (r *gatewayResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
+	// Write-only token: read it from the configuration, never the
+	// plan/state. It is sent only when the rotation trigger changed.
+	var apiToken string
+	if req.Config.Schema != nil {
+		var config gatewayModel
+		resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if config.APIToken.IsUnknown() {
+			resp.Diagnostics.AddError(
+				"api_token must be known at apply time",
+				"The write-only token cannot be deferred to apply — use a known value (an ephemeral variable resolves "+
+					"before apply) and apply again.",
+			)
+			return
+		}
+		if !config.APIToken.IsNull() {
+			apiToken = config.APIToken.ValueString()
+		}
+	}
+	plan.APIToken = types.StringNull()
+
 	pd := r.data(&resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
@@ -520,6 +662,36 @@ func (r *gatewayResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 	if resp.Diagnostics.HasError() {
 		return
+	}
+
+	// The rotation trigger is the only visible signal for a write-only
+	// value: an unchanged trigger never re-sends, even though the token
+	// is present in the config on every apply. Removing the trigger is
+	// not a rotation — it just drops the declarative claim. A changed,
+	// non-null trigger without a token cannot send anything — refuse
+	// before the PATCH.
+	if plan.RotateAPIToken.IsUnknown() {
+		plan.RotateAPIToken = state.RotateAPIToken
+	}
+	if !plan.RotateAPIToken.IsNull() && !plan.RotateAPIToken.Equal(state.RotateAPIToken) {
+		if apiToken == "" {
+			resp.Diagnostics.AddError(
+				"api_token is required to rotate the Tailscale API token",
+				"rotate_api_token_on changed, but api_token is null. Set api_token from an ephemeral variable (or revert "+
+					"the trigger); a write-only value cannot be read back from state.",
+			)
+			return
+		}
+
+		gw, err := pd.client.SetGatewayApiToken(ctx, orgID, plan.ID.ValueString(), apiToken)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Unable to save the Tailscale API token",
+				fmt.Sprintf("gateway %s: %v", plan.ID.ValueString(), err),
+			)
+			return
+		}
+		mapGateway(&plan, gw)
 	}
 
 	configured, d := instanceSet(ctx, plan.Instances)

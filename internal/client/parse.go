@@ -109,3 +109,25 @@ func attrStringMap(attrs map[string]any, key string) (map[string]string, error) 
 	}
 	return out, nil
 }
+
+// attrOptStringList reads an optional array-of-strings attribute (nil
+// when absent). A present-but-wrong-typed element is shape drift.
+func attrOptStringList(attrs map[string]any, key string) ([]string, error) {
+	v, ok := attrs[key]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	raw, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s is %T, want array", key, v)
+	}
+	out := make([]string, 0, len(raw))
+	for i, val := range raw {
+		s, ok := val.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d] is %T, want string", key, i, val)
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}

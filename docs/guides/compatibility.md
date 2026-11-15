@@ -20,6 +20,7 @@ done silently in 0.x:
   - `fluxvale_apps` (data source — the catalog)
   - `fluxvale_app_versions` (data source)
   - `fluxvale_instance` (data source — read by id or slug)
+  - `fluxvale_domain_delegation` (data source — the pre-registration DNS records)
 - Attribute names that mirror the `/api/v1` field names they map
 
 ALLOWED TO MOVE while 0.x: computed/status fields, new schema
@@ -55,10 +56,25 @@ classify existing env keys); the first apply that sets
 `secret_env_vars` records it, and keys never set that way stay
 untracked.
 
+
 The platform's rolling restart needs room for a second pod. On an app
 whose quota allows only one, stop it (`running = false`) before the
 bump, apply, then start it again; otherwise the rollout can mark the
 instance `error`.
+
+## Gateway API token (additive)
+
+`fluxvale_access_gateway` gains `api_token` (write-only, sensitive),
+`rotate_api_token_on` (the rotation trigger), `token_set_at` and
+`claimed_domains` (computed). Existing configurations need no change.
+
+`api_token` uses the same write-only mechanics as `secret_env_vars`:
+**Terraform 1.12+ or OpenTofu 1.13+**, in a provider release containing
+the attribute. On an older CLI, leave it out and paste the token in the
+panel. The value never enters state or plan; `token_set_at` (the
+rotation clock) and the claimed domain names do. On create the token is
+sent once, after the gateway serves; afterwards it is sent only when
+`rotate_api_token_on` changes. Import leaves both token attributes null.
 
 **1.0 freeze**: when the first non-owner user writes `.tf` against this
 provider. From then on, removals and renames are versioned decisions.

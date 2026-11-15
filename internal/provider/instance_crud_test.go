@@ -186,9 +186,10 @@ func TestProviderRegistrations(t *testing.T) {
 	}
 
 	wantSources := map[string]bool{
-		"fluxvale_apps":         false,
-		"fluxvale_app_versions": false,
-		"fluxvale_instance":     false,
+		"fluxvale_apps":              false,
+		"fluxvale_app_versions":      false,
+		"fluxvale_instance":          false,
+		"fluxvale_domain_delegation": false,
 	}
 	sources := p.DataSources(ctx)
 	if len(sources) != len(wantSources) {

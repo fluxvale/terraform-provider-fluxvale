@@ -26,6 +26,8 @@ provider page, per-resource and per-data-source pages, and the
   single-instance teaching example
 - [`examples/team-org`](examples/team-org) — a team organization and
   its first app, showing the dependency edge
+- [`examples/cloudflare-stack`](examples/cloudflare-stack) — a domain
+  wired end to end: delegation record, registration, gateway claim
 
 ## Releases
 
