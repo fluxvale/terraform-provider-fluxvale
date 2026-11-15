@@ -123,7 +123,16 @@ data "fluxvale_app_versions" "test" {
   app = "forgejo"
 }
 
+# The org and the instance in one apply: the instance's organization
+# reference is the dependency edge, so the org exists first and is
+# destroyed last.
+resource "fluxvale_organization" "team" {
+  name = "Acme"
+  slug = "acme"
+}
+
 resource "fluxvale_instance" "a" {
+  organization = fluxvale_organization.team.slug
   name        = "smoke-a"
   app         = "forgejo"
   app_version = data.fluxvale_app_versions.test.app_versions[0].version
@@ -134,6 +143,7 @@ resource "fluxvale_instance" "a" {
 
 # Different size, private, with env vars and a backups row.
 resource "fluxvale_instance" "b" {
+  organization = fluxvale_organization.team.slug
   name        = "smoke-b"
   app         = "forgejo"
   app_version = data.fluxvale_app_versions.test.app_versions[0].version
@@ -146,6 +156,7 @@ resource "fluxvale_instance" "b" {
 
 # The example stack's headline posture: always-on (never sleeps).
 resource "fluxvale_instance" "c" {
+  organization = fluxvale_organization.team.slug
   name        = "smoke-c"
   app         = "forgejo"
   app_version = data.fluxvale_app_versions.test.app_versions[0].version
@@ -165,6 +176,7 @@ resource "fluxvale_instance_backups" "b" {
 }
 
 resource "fluxvale_access_gateway" "g" {
+  organization   = fluxvale_organization.team.slug
   tailnet_domain = "smoke.ts.net"
   auth_key       = "tskey-smoke"
   instances      = [fluxvale_instance.b.id]
@@ -216,8 +228,8 @@ data "fluxvale_instance" "b_by_id" {
 	}
 
 	plan := runTofu(clipath, "plan", "-out=tfplan")
-	if !strings.Contains(plan, "5 to add") {
-		t.Fatalf("plan did not add the five resources:\n%s", plan)
+	if !strings.Contains(plan, "6 to add") {
+		t.Fatalf("plan did not add the six resources (org + three instances + backups + gateway):\n%s", plan)
 	}
 	assertSecretNotInPlan(t, work, secretOne)
 	runTofu(clipath, "apply", "tfplan")
@@ -447,6 +459,8 @@ data "fluxvale_instance" "b_by_id" {
 	// updates add no POST and no replacement: both counts stay at the
 	// create-time figures.
 	fake.wantCounts(t,
+		countExact("POST", "/api/v1/organizations", 1),
+		countExact("DELETE", "/api/v1/organizations/org-1", 1),
 		countExact("POST", "/api/v1/instances", 3),
 		countSuffix("PATCH", "/exposure", 1),
 		countSuffix("PATCH", "/always-on", 1),
@@ -535,6 +549,33 @@ data "fluxvale_instance" "b_by_id" {
 	// instance's DELETE is followed by at least one GET on the same id
 	// — the wait-gone poll proving the teardown finished.
 	fake.wantDeleteThenPoll(t, "inst-1", "inst-2", "inst-3")
+
+	// The org and the instance in one apply, in dependency order: the
+	// org POSTs before the first instance POST, and the org DELETE is
+	// last — after every instance DELETE.
+	var orgPost, firstInstancePost, lastInstanceDelete, orgDelete = -1, -1, -1, -1
+	for i, r := range fake.all() {
+		switch {
+		case r.method == "POST" && r.path == "/api/v1/organizations" && orgPost < 0:
+			orgPost = i
+		case r.method == "POST" && r.path == "/api/v1/instances" && firstInstancePost < 0:
+			firstInstancePost = i
+		case r.method == "DELETE" && strings.HasPrefix(r.path, "/api/v1/instances/"):
+			lastInstanceDelete = i
+		case r.method == "DELETE" && r.path == "/api/v1/organizations/org-1":
+			orgDelete = i
+		}
+	}
+	if orgPost < 0 || firstInstancePost < 0 || lastInstanceDelete < 0 || orgDelete < 0 {
+		t.Fatalf("missing org/instance call: orgPost=%d firstInstancePost=%d lastInstanceDelete=%d orgDelete=%d",
+			orgPost, firstInstancePost, lastInstanceDelete, orgDelete)
+	}
+	if orgPost > firstInstancePost {
+		t.Errorf("instance POST at %d preceded the org POST at %d — the dependency edge did not order the apply", firstInstancePost, orgPost)
+	}
+	if orgDelete < lastInstanceDelete {
+		t.Errorf("org DELETE at %d preceded the last instance DELETE at %d — destroy order is wrong", orgDelete, lastInstanceDelete)
+	}
 
 	// The version wiring, end to end: the binary's User-Agent carries
 	// the const (internal/provider/version.go) — the release workflow's
@@ -766,6 +807,23 @@ func newSmokeFake(t *testing.T) *smokeFake {
 	mux.HandleFunc("/api/v1/organizations", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r, nil)
 		f.json(w, http.StatusOK, `{"data": [{"id": "org-1", "type": "organization", "attributes": {"slug": "acme", "name": "Acme"}}]}`)
+	})
+	mux.HandleFunc("POST /api/v1/organizations", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.record(r, body)
+		f.json(w, http.StatusCreated, `{"data": {"id": "org-1", "type": "organization", "attributes": {"slug": "acme", "name": "Acme"}}}`)
+	})
+	mux.HandleFunc("GET /api/v1/organizations/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.record(r, nil)
+		f.json(w, http.StatusOK, `{"data": {"id": "org-1", "type": "organization", "attributes": {"slug": "acme", "name": "Acme"}}}`)
+	})
+	mux.HandleFunc("DELETE /api/v1/organizations/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.record(r, nil)
+		f.mu.Lock()
+		f.deleted[r.PathValue("id")] = true
+		f.mu.Unlock()
+		f.json(w, http.StatusOK, `{"data": {"id": "org-1", "type": "organization", "attributes": {"slug": "acme", "name": "Acme"}}}`)
 	})
 	mux.HandleFunc("/api/v1/apps", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r, nil)

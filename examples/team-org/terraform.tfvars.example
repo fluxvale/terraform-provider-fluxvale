@@ -1,0 +1,8 @@
+api_url = "https://fluxvale.com"
+org_name = "Acme"
+org_slug = "acme-team"
+app_slug = "forgejo"
+instance_name = "forgejo"
+cpu_cores = 0.5
+memory_mb = 512
+storage_gb = 5

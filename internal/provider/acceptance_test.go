@@ -98,7 +98,8 @@ func accPreCheck(t *testing.T) {
 	t.Helper()
 	if os.Getenv("TF_ACC_API_URL") == "" || os.Getenv("TF_ACC_PAT") == "" {
 		t.Fatalf("TF_ACC_API_URL and TF_ACC_PAT must be set — mint a PAT on the platform " +
-			"(scopes instances:write backups:write gateways:write + catalog:read; the org must have paid once for backups)")
+			"(scopes instances:write backups:write gateways:write catalog:read organizations:read organizations:write; " +
+			"the org must have paid once for backups)")
 	}
 }
 
@@ -200,6 +201,79 @@ data "fluxvale_apps" "catalog" {}
 				},
 			),
 		}},
+	})
+}
+
+// TestAccOrganization creates a real team organization, renames it in
+// place, and verifies import by slug. It never funds the org, so the
+// final destroy removes it — the resource's real-server contract
+// (actor-owned create, name-only rename, slug import, empty teardown).
+func TestAccOrganization(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set — the acceptance lane runs nightly/tags/dispatch, never per-PR (wallet cost)")
+	}
+	if !accHasResource("fluxvale_organization") {
+		t.Skip("fluxvale_organization is not registered in this provider build")
+	}
+
+	slug := fmt.Sprintf("acc-org-%d", time.Now().UnixNano())
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: accProtoV6(),
+		PreCheck:                 func() { accPreCheck(t) },
+		CheckDestroy: func(s *terraform.State) error {
+			c := accClient(t)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			for addr, rs := range s.RootModule().Resources {
+				if rs.Type != "fluxvale_organization" {
+					continue
+				}
+				_, err := c.GetOrganization(ctx, rs.Primary.ID)
+				if err == nil {
+					return fmt.Errorf("organization %s (%s) still exists after destroy", rs.Primary.ID, addr)
+				}
+				var apiErr *client.APIError
+				if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
+					return fmt.Errorf("checking organization %s: %w", rs.Primary.ID, err)
+				}
+			}
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{
+				Config: accVarDecls + fmt.Sprintf(`
+resource "fluxvale_organization" "acc" {
+  name = "Acceptance Org"
+  slug = %q
+}
+`, slug),
+				ConfigVariables: accVars(t),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("fluxvale_organization.acc", "slug", slug),
+					resource.TestCheckResourceAttr("fluxvale_organization.acc", "name", "Acceptance Org"),
+				),
+			},
+			{
+				// The rename is an in-place PATCH: same id, same slug.
+				Config: accVarDecls + fmt.Sprintf(`
+resource "fluxvale_organization" "acc" {
+  name = "Acceptance Org Renamed"
+  slug = %q
+}
+`, slug),
+				ConfigVariables: accVars(t),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("fluxvale_organization.acc", "name", "Acceptance Org Renamed"),
+					resource.TestCheckResourceAttr("fluxvale_organization.acc", "slug", slug),
+				),
+			},
+			{
+				ResourceName:      "fluxvale_organization.acc",
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
 	})
 }
 
