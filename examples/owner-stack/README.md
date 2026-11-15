@@ -215,7 +215,8 @@ attribute) — what's pending is the dogfood initiative's decisions
 pairings stay placeholder rows: no domain registers on apply. Two
 known platform facts for that conversation: the first
 `fluxvale_custom_domain` create passes the org-wallet gate
-(`ActorOrgHasPaid`), and `verified` is NOT resolution — the
-split-DNS claim has no API surface yet
-([examples/personal-stack](../personal-stack/README.md) documents
-both).
+(`ActorOrgHasPaid`), and `verified` is not resolution — the org's
+gateway still has to claim the domain (the token save, a later
+verification, or an attach does it). See
+[examples/personal-stack](../personal-stack/README.md) and
+[examples/cloudflare-stack](../cloudflare-stack/README.md) for both.

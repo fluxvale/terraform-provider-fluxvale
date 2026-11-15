@@ -173,7 +173,12 @@ func (p *fluxvaleProvider) Resources(ctx context.Context) []func() resource.Reso
 
 // DataSources returns the provider's data-source set.
 func (p *fluxvaleProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{NewAppsDataSource, NewAppVersionsDataSource, NewInstanceDataSource}
+	return []func() datasource.DataSource{
+		NewAppsDataSource,
+		NewAppVersionsDataSource,
+		NewInstanceDataSource,
+		NewDomainDelegationDataSource,
+	}
 }
 
 // stringValue returns a config string only if set AND known. Values

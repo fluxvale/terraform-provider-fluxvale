@@ -46,14 +46,17 @@ acceptance: everything here tears down, except the access gateway —
 destroying it removes it from state only (the API has no delete route;
 opt out via the panel's Access tab).
 
-## `verified` is NOT resolution
+## `verified` is not resolution
 
 The custom domain's `state` reaching `verified` means the wildcard
 certificate was issued (DNS-01 answered by your DNS delegation). It
-does NOT mean the name resolves: the split-DNS claim that points the
-name into the tailnet has no API surface yet — claiming is a separate
-platform capability on a later slice. Watch `domain_state`, expect no
-traffic until that lands.
+does not mean the name resolves: the org's gateway must claim it. Saving
+the gateway's Tailscale API token claims the verified domains it can; a
+later verification or attach claims too. With `api_token` on
+`fluxvale_access_gateway`, the claim joins the apply that creates the
+gateway or bumps `rotate_api_token_on` — order the gateway after the
+domain. Watch `domain_state` and the gateway's `claimed_domains`
+together.
 
 ## Notes
 

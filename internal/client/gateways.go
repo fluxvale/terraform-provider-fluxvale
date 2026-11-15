@@ -22,6 +22,12 @@ type AccessGateway struct {
 	StatusMessage  *string
 	MonthlyCents   int64
 	ProvisionedAt  *string
+	// The claim path's readable half (fluxvale/fluxvale#771, fluxvale/fluxvale#783): whether the token
+	// intake has landed, the rotation clock, and the claimed domain
+	// names. The token value itself never comes back.
+	APITokenSet    *bool
+	TokenSetAt     *string
+	ClaimedDomains []string
 }
 
 func accessGatewayFromResource(row Resource) (AccessGateway, error) {
@@ -62,6 +68,18 @@ func accessGatewayFromResource(row Resource) (AccessGateway, error) {
 	if err != nil {
 		return AccessGateway{}, err
 	}
+	tokenSet, err := attrOptBool(row.Attributes, "api_token_set")
+	if err != nil {
+		return AccessGateway{}, err
+	}
+	tokenSetAt, err := attrOptString(row.Attributes, "token_set_at")
+	if err != nil {
+		return AccessGateway{}, err
+	}
+	claimedDomains, err := attrOptStringList(row.Attributes, "claimed_domains")
+	if err != nil {
+		return AccessGateway{}, err
+	}
 	return AccessGateway{
 		ID:             row.ID,
 		OrganizationID: orgID,
@@ -72,7 +90,29 @@ func accessGatewayFromResource(row Resource) (AccessGateway, error) {
 		StatusMessage:  statusMessage,
 		MonthlyCents:   *cents,
 		ProvisionedAt:  provisionedAt,
+		APITokenSet:    tokenSet,
+		TokenSetAt:     tokenSetAt,
+		ClaimedDomains: claimedDomains,
 	}, nil
+}
+
+// SetGatewayApiToken calls PATCH /api/v1/access-gateways/:id/api-token
+// (fluxvale/fluxvale#760) — the same intake the panel uses. The token is write-only: it
+// rides the request and the response never echoes it. The PATCH route
+// answers only the claim state, not the full row, so the singleton read
+// follows to return what mapGateway expects. The save claims the org's
+// already-verified domains; the read carries the result. Owner-only
+// server-side; a 403 surfaces verbatim.
+func (c *Client) SetGatewayApiToken(ctx context.Context, orgID, id, token string) (AccessGateway, error) {
+	if _, err := c.send(ctx, http.MethodPatch, "/api/v1/access-gateways/"+id+"/api-token", map[string]any{
+		"data": map[string]any{
+			"type":       "access_gateway",
+			"attributes": map[string]any{"api_token": token},
+		},
+	}); err != nil {
+		return AccessGateway{}, err
+	}
+	return c.GetOrgGateway(ctx, orgID)
 }
 
 // CreateGatewayInput is the POST /api/v1/access-gateways body.

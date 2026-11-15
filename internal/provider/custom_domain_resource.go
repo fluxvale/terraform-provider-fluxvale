@@ -67,7 +67,7 @@ type customDomainModel struct {
 
 func (r *customDomainResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Your own domain registered on the private-access edge. Register lands the row `pending` and mints the wildcard Certificate in the same transaction; verification is issuance — the platform's observer pass (about a 15-minute cadence) promotes pending → verified once your DNS delegation answers the DNS-01 challenge, and fails the row past its issuance window (~72h). VERIFIED IS NOT RESOLUTION: a verified domain still answers nothing on the tailnet — the split-DNS claim that points the name into the tailnet has no API surface yet; claiming is a separate platform capability on a later slice. This resource registers, verifies (DNS-01), and tears down, nothing more.",
+		Description: "Your own domain registered on the private-access edge. Register lands the row `pending` and mints the wildcard Certificate in the same transaction; verification is issuance — the platform's observer pass (about a 15-minute cadence) promotes pending → verified once your DNS delegation answers the DNS-01 challenge, and fails the row past its issuance window (~72h). VERIFIED IS NOT RESOLUTION BY ITSELF: the name answers only after the org's gateway claims it — saving the gateway's Tailscale API token claims every verified domain, and a later verification or attach claims too. The delegation records come from the fluxvale_domain_delegation data source; this resource registers, verifies (DNS-01), and tears down, nothing more.",
 		Attributes: map[string]schema.Attribute{
 			"domain": schema.StringAttribute{
 				Required: true,
@@ -303,9 +303,10 @@ func (r *customDomainResource) Create(ctx context.Context, req resource.CreateRe
 }
 
 // waitDomainVerified polls GET /access-domains/:id until the row
-// verifies. VERIFIED IS NOT RESOLUTION: verified means the wildcard
-// Certificate issued (DNS-01) — the domain still answers nothing on
-// the tailnet until the separate claiming capability lands. failed
+// verifies. VERIFIED IS NOT RESOLUTION BY ITSELF: verified means the
+// wildcard Certificate issued (DNS-01) — the name answers only after
+// the org's gateway saves its Tailscale API token (or a later
+// verification/attach claims). failed
 // fails fast: the wire's public surface carries no status message (the
 // pinned field set), so the state string is the whole story the API
 // tells — and failed is terminal for a registration; the fix is remove

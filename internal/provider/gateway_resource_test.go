@@ -842,9 +842,9 @@ func TestGatewaySchemaContract(t *testing.T) {
 	r, sch := newSchemadGateway(ctx, t)
 
 	want := []string{
-		"organization", "tailnet_domain", "auth_key", "instances",
-		"id", "organization_id", "hostname", "access_provider", "state",
-		"status_message", "monthly_cents", "provisioned_at",
+		"organization", "tailnet_domain", "auth_key", "api_token", "rotate_api_token_on",
+		"instances", "id", "organization_id", "hostname", "access_provider", "state",
+		"status_message", "monthly_cents", "provisioned_at", "token_set_at", "claimed_domains",
 	}
 	if len(sch.Attributes) != len(want) {
 		t.Fatalf("schema attributes = %d, want exactly %d (%v)", len(sch.Attributes), len(want), want)
