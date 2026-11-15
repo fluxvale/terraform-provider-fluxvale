@@ -57,7 +57,7 @@ Guides: [Installing the provider](guides/install.md) · [Secrets in Terraform](g
 
 ## Upgrading to v0.5.0
 
-`fluxvale_organization` is new in v0.5.0. The platform's matching change scopes the org list — which every org-scoped resource resolves through — so reads now require `organizations:read`. Re-mint tokens minted before v0.5.0, or the first org resolution 403s mid-apply. Managing the org resource itself also needs `organizations:write`.
+`fluxvale_organization` (resource) and `fluxvale_domain_delegation` (data source) are new in v0.5.0. The platform's matching change scopes the org list — which every org-scoped resource resolves through — so reads now require `organizations:read`. Re-mint tokens minted before v0.5.0, or the first org resolution 403s mid-apply. Managing the org resource itself also needs `organizations:write`; the delegation data source is a gateway-family read and needs `gateways:read`.
 
 ## 0.x compatibility
 
