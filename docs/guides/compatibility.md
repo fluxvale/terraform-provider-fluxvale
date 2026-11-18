@@ -80,7 +80,7 @@ sent once, after the gateway serves; afterwards it is sent only when
 
 From 0.6.0, `fluxvale_access_gateway` can be enabled with `api_token`
 alone: the platform mints the gateway's join key from the token (it
-needs Tailscale's `auth_keys` scope, alongside `dns`, `devices:routes`,
+needs a token from a tailnet owner/admin account (console API tokens carry the account's full permissions; the old `dns`/`devices:routes`,
 and `devices:core:read`). `auth_key` remains the documented fallback:
 paste a join key minted in the Tailscale admin console instead. No
 renames and no changed attribute semantics — the stable names above are

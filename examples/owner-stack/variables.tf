@@ -62,7 +62,7 @@ variable "tailnet_domain" {
 }
 
 variable "tailscale_api_token" {
-  description = "The Tailscale API access token (dns, devices:routes, devices:core:read, auth_keys scopes — minted from a tailnet owner/admin account). Write-only: never enters state or plan; the platform mints the gateway's join key from it."
+  description = "The Tailscale API access token, minted from a tailnet owner/admin account (console tokens carry the account's full permissions). Write-only: never enters state or plan; the platform mints the gateway's join key from it."
   type        = string
   sensitive   = true
   ephemeral   = true
