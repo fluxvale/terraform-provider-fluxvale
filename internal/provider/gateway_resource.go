@@ -111,8 +111,9 @@ func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				WriteOnly: true,
 				MarkdownDescription: "The Tailscale API access token the platform uses to claim verified custom domains " +
 					"on your tailnet — and, with no auth_key, to mint the gateway's join key. Mint it from a tailnet " +
-					"owner/admin account with the `dns`, `devices:routes`, `devices:core:read`, and `auth_keys` scopes " +
-					"(the mint needs `auth_keys`); keys expire within 90 days. **Write-only:** Terraform never writes " +
+					"owner/admin account — the token carries that account's permissions " +
+					"(console API tokens are fully permitted; scopes belong to trust credentials, not " +
+					"Keys-page tokens); keys expire within 90 days. **Write-only:** Terraform never writes " +
 					"the value to state or plan, and the API never echoes it. On create with no auth_key the platform " +
 					"mints a single-use, tagged, 1-hour join key from this token; revocation is automatic on use. " +
 					"Otherwise it is sent once, after the gateway reaches `active`, and the save claims every verified " +
@@ -321,7 +322,7 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 		resp.Diagnostics.AddError(
 			"auth_key or api_token is required to enable a gateway",
 			"The gateway joins your tailnet with an auth key, and the API accepts it only at create. "+
-				"Set api_token (the platform mints the join key from it — the token needs the auth_keys scope) "+
+				"Set api_token (the platform mints the join key from it — minted from a tailnet owner/admin account) "+
 				"or auth_key (the legacy two-paste path) — or import the existing gateway instead of creating one.",
 		)
 		return

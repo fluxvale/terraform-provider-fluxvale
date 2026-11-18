@@ -157,7 +157,7 @@ func TestGatewayCreateRequiresACredential(t *testing.T) {
 	assertError(t, &resp.Diagnostics,
 		"auth_key or api_token is required to enable a gateway",
 		"the platform mints the join key from it",
-		"the auth_keys scope",
+		"tailnet owner/admin account",
 		"the legacy two-paste path",
 		"import the existing gateway instead")
 	if len(f.all()) != 0 {

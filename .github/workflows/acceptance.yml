@@ -32,8 +32,8 @@
 #     gateway class (api_token alone; the platform mints the join
 #     key). Same standing-charge caveat as above. The value is a
 #     Tailscale API access token — NOT an auth key — minted from a
-#     tailnet owner/admin account with the scopes dns devices:routes
-#     devices:core:read auth_keys (auth_keys is what authorizes the
+#     tailnet owner/admin account (console tokens are fully permitted; no scope
+#     selection — the account's permissions authorize the
 #     platform's join-key mint).
 #   - TF_ACC_DOMAIN — the custom domain class.
 #   - TF_ACC_POCKET_ID_INSTANCE_ID — the PocketID SSO class (the
@@ -138,8 +138,8 @@ jobs:
           TF_ACC_TAILNET_DOMAIN: ${{ secrets.TF_ACC_TAILNET_DOMAIN }}
           TF_ACC_TAILSCALE_AUTH_KEY: ${{ secrets.TF_ACC_TAILSCALE_AUTH_KEY }}
           # The #836 mint class: a Tailscale API access token with the
-          # scopes dns devices:routes devices:core:read auth_keys (the
-          # mint needs auth_keys — see the tiered header above).
+          # a tailnet owner/admin account (console tokens carry full
+          # account permissions — see the tiered header above).
           # Sourced from the repo secret TAILSCALE_API_TOKEN, which
           # must be created; until it exists this resolves to empty
           # and the mint class skips (like the other optional tiers).

@@ -66,7 +66,7 @@ instance.
 | `r2_access_key_id` / `r2_secret_access_key` | Cloudflare dashboard → R2 → Manage API Tokens (object read/write) | `terraform.tfvars` |
 | `r2_bucket_name` | decision — default `fluxvale-backups`, unique in the account | optional, `terraform.tfvars` |
 | `tailnet_domain` | Tailscale admin console — the MagicDNS suffix (`<tailnet>.ts.net`) | `terraform.tfvars` |
-| `tailscale_api_token` | Tailscale admin console → Keys → Generate API token (scopes: `dns devices:routes devices:core:read auth_keys` — mint it from a tailnet owner/admin account; `auth_keys` is what lets the platform mint the gateway's join key) | `export TF_VAR_tailscale_api_token=…` — **only** the environment, never a file, never `terraform.tfvars` (like `FLUXVALE_PAT`) |
+| `tailscale_api_token` | Tailscale admin console → Keys → Generate API token, from a tailnet owner/admin account (console tokens carry the account's full permissions — no scope selection; that is what lets the platform mint the gateway's join key) | `export TF_VAR_tailscale_api_token=…` — **only** the environment, never a file, never `terraform.tfvars` (like `FLUXVALE_PAT`) |
 | `instances` | the catalog (listing one-liner below) + app/version/size choices | optional, `terraform.tfvars` |
 | `instances[].domain` | the dogfood plan — `git.fluxvale.com` (forgejo) and `analytics.fluxvale.com` (umami) are the placeholder pairings | optional, `terraform.tfvars` — left unset until that plan lands |
 
