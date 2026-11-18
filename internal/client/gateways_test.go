@@ -140,6 +140,100 @@ func TestCreateGatewayApiTokenOmissionStyle(t *testing.T) {
 	}
 }
 
+// The lane-B pair body (#836): set halves ride the attributes; an
+// empty pair is omitted entirely — the same omission style as
+// organization_id and api_token.
+func TestCreateGatewayClientPairOmissionStyle(t *testing.T) {
+	var gotBody map[string]any
+	srv := handlerServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, gatewayCreateDocument())
+	}))
+
+	c := New(srv.URL, "fvpat_test", "test", srv.Client())
+
+	if _, err := c.CreateGateway(context.Background(), CreateGatewayInput{
+		TailnetDomain:  "example.ts.net",
+		TsClientID:     "k1234567890abcdef",
+		TsClientSecret: "tskey-client-SECRET",
+	}); err != nil {
+		t.Fatalf("CreateGateway (pair): %v", err)
+	}
+	attrs := gotBody["data"].(map[string]any)["attributes"].(map[string]any)
+	if attrs["ts_client_id"] != "k1234567890abcdef" || attrs["ts_client_secret"] != "tskey-client-SECRET" {
+		t.Errorf("pair attributes = %v, want both halves on the wire", attrs)
+	}
+
+	if _, err := c.CreateGateway(context.Background(), CreateGatewayInput{
+		TailnetDomain: "example.ts.net",
+		AuthKey:       "tskey-test",
+	}); err != nil {
+		t.Fatalf("CreateGateway (legacy): %v", err)
+	}
+	attrs = gotBody["data"].(map[string]any)["attributes"].(map[string]any)
+	if _, ok := attrs["ts_client_id"]; ok {
+		t.Error("ts_client_id sent while empty — the omission style must match organization_id")
+	}
+	if _, ok := attrs["ts_client_secret"]; ok {
+		t.Error("ts_client_secret sent while empty — the omission style must match organization_id")
+	}
+}
+
+// SetGatewayClientPair: both halves sit at the attributes level of the
+// api-token PATCH, the secret never rides the response, and the
+// singleton read follows (the PATCH route answers only the claim
+// state).
+func TestSetGatewayClientPairBodyShape(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody map[string]any
+	srv := handlerServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			gotPath, gotMethod = r.URL.Path, r.Method
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Errorf("decode request body: %v", err)
+			}
+			fmt.Fprint(w, `{"data": {"id": "gw-1", "type": "access_gateway", "attributes": {
+				"organization_id": "org-1", "hostname": "fv-0a1b2c3d", "state": "active",
+				"status_message": null, "monthly_cents": 500,
+				"api_token_set": true, "token_set_at": "2026-11-19T10:00:00Z",
+				"claimed_domains": []}}}`)
+			return
+		}
+		// The follow-up singleton read: the claim state and rotation
+		// stamp ride the full row (gatewayTokenFullDoc's shape).
+		fmt.Fprint(w, `{"data": {"id": "gw-1", "type": "access_gateway", "attributes": {
+			"organization_id": "org-1", "hostname": "fv-0a1b2c3d", "tailnet_domain": "example.ts.net",
+			"provider": "tailscale", "state": "active", "status_message": null,
+			"monthly_cents": 500, "provisioned_at": "2026-11-06T10:00:00Z",
+			"api_token_set": true, "token_set_at": "2026-11-19T10:00:00Z",
+			"claimed_domains": ["apps.customer.com"]}}}`)
+	}))
+
+	c := New(srv.URL, "fvpat_test", "test", srv.Client())
+	gw, err := c.SetGatewayClientPair(context.Background(), "org-1", "gw-1", "k1234567890abcdef", "tskey-client-SECRET")
+	if err != nil {
+		t.Fatalf("SetGatewayClientPair: %v", err)
+	}
+
+	if gotMethod != http.MethodPatch || gotPath != "/api/v1/access-gateways/gw-1/api-token" {
+		t.Errorf("request = %s %s, want PATCH /api/v1/access-gateways/gw-1/api-token", gotMethod, gotPath)
+	}
+	data, _ := gotBody["data"].(map[string]any)
+	attrs := data["attributes"].(map[string]any)
+	if attrs["ts_client_id"] != "k1234567890abcdef" || attrs["ts_client_secret"] != "tskey-client-SECRET" {
+		t.Errorf("pair attributes = %v, want both halves at the attributes level", attrs)
+	}
+	if _, ok := attrs["api_token"]; ok {
+		t.Error("api_token sent beside the pair — one shape per save")
+	}
+	if gw.TokenSetAt == nil || *gw.TokenSetAt != "2026-11-19T10:00:00Z" {
+		t.Errorf("token_set_at = %v, want the PATCH response's stamp (the read-back followed)", gw.TokenSetAt)
+	}
+}
+
 func TestGetOrgGateway404IsTyped(t *testing.T) {
 	srv := testServer(t, http.StatusNotFound, `{"errors": [{"status": "404"}]}`)
 	c := New(srv.URL, "fvpat_test", "test", srv.Client())

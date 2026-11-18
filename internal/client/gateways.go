@@ -115,6 +115,33 @@ func (c *Client) SetGatewayApiToken(ctx context.Context, orgID, id, token string
 	return c.GetOrgGateway(ctx, orgID)
 }
 
+// SetGatewayClientPair calls PATCH /api/v1/access-gateways/:id/api-token
+// with the OAuth client pair (#836 lane B) — the same intake the
+// panel uses, one shape per save: the pair REPLACES a stored console
+// token in the credential Secret and vice versa (the platform's
+// store is an upsert of the whole data map). The client id is public
+// identity; the secret is write-only — it rides the request and the
+// response never echoes it. Exactly one shape per call: the pair
+// beside a token (or either half alone) is a 400 whose field-scoped
+// sentence surfaces verbatim. The PATCH route answers only the claim
+// state, not the full row, so the singleton read follows to return
+// what mapGateway expects. Owner-only server-side; a 403 surfaces
+// verbatim.
+func (c *Client) SetGatewayClientPair(ctx context.Context, orgID, id, clientID, clientSecret string) (AccessGateway, error) {
+	if _, err := c.send(ctx, http.MethodPatch, "/api/v1/access-gateways/"+id+"/api-token", map[string]any{
+		"data": map[string]any{
+			"type": "access_gateway",
+			"attributes": map[string]any{
+				"ts_client_id":     clientID,
+				"ts_client_secret": clientSecret,
+			},
+		},
+	}); err != nil {
+		return AccessGateway{}, err
+	}
+	return c.GetOrgGateway(ctx, orgID)
+}
+
 // CreateGatewayInput is the POST /api/v1/access-gateways body.
 type CreateGatewayInput struct {
 	OrganizationID string // "" omits — the server falls back to the actor's personal org
@@ -125,6 +152,16 @@ type CreateGatewayInput struct {
 	// exactly one credential: both (or neither) of AuthKey/ApiToken is
 	// a 400 whose pinned sentence surfaces verbatim.
 	ApiToken string
+	// TsClientID/TsClientSecret are the OAuth client pair (#836 lane
+	// B) — the preferred enrollment credential. The secret is
+	// write-only (never rendered in any response); the id is public
+	// identity and is NOT sensitive on the wire. Both are omitted when
+	// empty (the ApiToken style), and the wire still takes exactly one
+	// credential shape: the pair beside auth_key or api_token is a 400
+	// whose field-scoped sentence surfaces verbatim, as is a lone
+	// pair half.
+	TsClientID     string
+	TsClientSecret string
 }
 
 // CreateGateway calls POST /api/v1/access-gateways. The create is
@@ -144,6 +181,12 @@ func (c *Client) CreateGateway(ctx context.Context, in CreateGatewayInput) (Acce
 	}
 	if in.ApiToken != "" {
 		attrs["api_token"] = in.ApiToken
+	}
+	if in.TsClientID != "" {
+		attrs["ts_client_id"] = in.TsClientID
+	}
+	if in.TsClientSecret != "" {
+		attrs["ts_client_secret"] = in.TsClientSecret
 	}
 	doc, err := c.Do(ctx, http.MethodPost, "/api/v1/access-gateways", map[string]any{
 		"data": map[string]any{"type": "access_gateway", "attributes": attrs},

@@ -109,13 +109,24 @@ type recordedRequest struct {
 	body               map[string]any
 }
 
-// The #836 pinned refusal sentences (the platform's 400 bodies, field
-// auth_key or api_token). The fake serves them verbatim and the tests
-// assert them verbatim — no local mapping in the provider.
+// The #836 pinned refusal sentences (the platform's 400 bodies,
+// field-scoped). The fake serves them verbatim and the tests assert
+// them verbatim — no local mapping in the provider. The lane-B pair
+// sentences come from CreateStoresApiToken (create) and SetApiToken
+// (the PATCH) — each surface names its own shape list.
 const (
 	gatewayRefusalNeitherCredential = "Paste an auth key or an API token to enable private access"
 	gatewayRefusalBothCredentials   = "Paste one or the other, not both"
 	gatewayRefusalMissingScope      = "Your Tailscale API key can't create join keys — add the `auth_keys` scope when you mint it, or paste an auth key instead"
+	// Create-path lane B (CreateStoresApiToken): a complete pair
+	// beside any other credential is ambiguity; a lone pair half
+	// wants its sibling.
+	gatewayRefusalMixedCredential = "Paste one credential only — the client pair or an API token or an auth key"
+	gatewayRefusalPairHalf        = "Save the client id and secret together"
+	// PATCH-path lane B (SetApiToken): one refusal sentence naming
+	// both accepted shapes — the mix, a lone half, and an empty save
+	// all answer it, each on its offending field.
+	gatewayRefusalPatchPairHalf = "Save the client id and secret together, or the API token alone"
 )
 
 type scriptedResponse struct {
@@ -365,24 +376,46 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.record(r, body)
-		// The #836 one-credential contract, enforced the way the
-		// platform enforces it: the create takes auth_key (the legacy
-		// path) or api_token (the mint) — exactly one. The pinned
-		// sentences ride `detail` so they surface verbatim through the
-		// client's *APIError (the provider maps none of them locally).
+		// The #836 one-credential contract, extended to the lane-B
+		// three-way shape and enforced the way the platform enforces
+		// it (CreateStoresApiToken's match order): the create takes
+		// the OAuth client pair (both halves), api_token, or auth_key
+		// — exactly one shape. The pinned sentences ride `detail` with
+		// the platform's own field scoping, so they surface verbatim
+		// through the client's *APIError (the provider maps none of
+		// them locally).
 		attrs, _ := body["data"].(map[string]any)["attributes"].(map[string]any)
 		authKey, _ := attrs["auth_key"].(string)
 		apiToken, _ := attrs["api_token"].(string)
+		clientID, _ := attrs["ts_client_id"].(string)
+		clientSecret, _ := attrs["ts_client_secret"].(string)
 		switch {
-		case authKey == "" && apiToken == "":
+		case clientID != "" && clientSecret != "" && (authKey != "" || apiToken != ""):
 			f.json(w, http.StatusBadRequest, `{"errors": [{"code": "invalid_argument",
-				"detail": "`+gatewayRefusalNeitherCredential+`",
-				"source": {"pointer": "/data/attributes/auth_key"}}]}`)
+				"detail": "`+gatewayRefusalMixedCredential+`",
+				"source": {"pointer": "/data/attributes/ts_client_id"}}]}`)
 			return
+		case clientID != "" && clientSecret != "":
+			// The pair alone: the accepted preferred shape.
 		case authKey != "" && apiToken != "":
 			f.json(w, http.StatusBadRequest, `{"errors": [{"code": "invalid_argument",
 				"detail": "`+gatewayRefusalBothCredentials+`",
 				"source": {"pointer": "/data/attributes/api_token"}}]}`)
+			return
+		case clientID != "":
+			f.json(w, http.StatusBadRequest, `{"errors": [{"code": "invalid_argument",
+				"detail": "`+gatewayRefusalPairHalf+`",
+				"source": {"pointer": "/data/attributes/ts_client_secret"}}]}`)
+			return
+		case clientSecret != "":
+			f.json(w, http.StatusBadRequest, `{"errors": [{"code": "invalid_argument",
+				"detail": "`+gatewayRefusalPairHalf+`",
+				"source": {"pointer": "/data/attributes/ts_client_id"}}]}`)
+			return
+		case authKey == "" && apiToken == "":
+			f.json(w, http.StatusBadRequest, `{"errors": [{"code": "invalid_argument",
+				"detail": "`+gatewayRefusalNeitherCredential+`",
+				"source": {"pointer": "/data/attributes/auth_key"}}]}`)
 			return
 		}
 		f.json(w, f.gatewayPostStatus, f.gatewayPostDoc)
@@ -426,13 +459,44 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		f.json(w, f.domainDelegationStatus, f.domainDelegationDoc)
 	})
 
-	// fluxvale/fluxvale#783: the write-only Tailscale API token save. The response is a
-	// JSON:API gateway row (the route's default_fields include the
-	// claim state and rotation stamp); the token itself never appears.
+	// fluxvale/fluxvale#783: the write-only Tailscale credential save — the console
+	// token alone or the OAuth client pair (#836 lane B), one shape per
+	// save (SetApiToken's contract: a mix, a lone pair half, or an
+	// empty save is a 400 whose pair sentence rides the offending
+	// field). The response is a JSON:API gateway row (the route's
+	// default_fields include the claim state and rotation stamp);
+	// neither secret value ever appears.
 	mux.HandleFunc("PATCH /api/v1/access-gateways/{id}/api-token", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.record(r, body)
+		attrs, _ := body["data"].(map[string]any)["attributes"].(map[string]any)
+		apiToken, _ := attrs["api_token"].(string)
+		clientID, _ := attrs["ts_client_id"].(string)
+		clientSecret, _ := attrs["ts_client_secret"].(string)
+		pairRefusal := func(field string) {
+			f.json(w, http.StatusBadRequest, `{"errors": [{"code": "invalid_argument",
+				"detail": "`+gatewayRefusalPatchPairHalf+`",
+				"source": {"pointer": "/data/attributes/`+field+`"}}]}`)
+		}
+		switch {
+		case apiToken != "" && (clientID != "" || clientSecret != ""):
+			pairRefusal("ts_client_id")
+			return
+		case apiToken != "", clientID != "" && clientSecret != "":
+			// An accepted shape: the console token alone or the
+			// complete pair.
+		case clientID != "":
+			pairRefusal("ts_client_secret")
+			return
+		case clientSecret != "":
+			pairRefusal("ts_client_id")
+			return
+		default:
+			// An empty save is a refused save (SetApiToken's stance).
+			pairRefusal("api_token")
+			return
+		}
 		f.json(w, f.gatewayTokenStatus, f.gatewayTokenDoc)
 	})
 
@@ -745,22 +809,25 @@ func testBackups(mutators ...func(*backupsModel)) backupsModel {
 // mutators adjust the rest.
 func testGateway(mutators ...func(*gatewayModel)) gatewayModel {
 	data := gatewayModel{
-		Organization:   types.StringNull(),
-		TailnetDomain:  types.StringValue("example.ts.net"),
-		AuthKey:        types.StringValue("tskey-test"),
-		APIToken:       types.StringNull(),
-		RotateAPIToken: types.StringNull(),
-		Instances:      types.SetNull(types.StringType),
-		ID:             types.StringNull(),
-		OrganizationID: types.StringNull(),
-		Hostname:       types.StringNull(),
-		AccessProvider: types.StringNull(),
-		State:          types.StringNull(),
-		StatusMessage:  types.StringNull(),
-		MonthlyCents:   types.Int64Null(),
-		ProvisionedAt:  types.StringNull(),
-		TokenSetAt:     types.StringNull(),
-		ClaimedDomains: types.ListNull(types.StringType),
+		Organization:         types.StringNull(),
+		TailnetDomain:        types.StringValue("example.ts.net"),
+		AuthKey:              types.StringValue("tskey-test"),
+		APIToken:             types.StringNull(),
+		RotateAPIToken:       types.StringNull(),
+		TSClientID:           types.StringNull(),
+		TSClientSecret:       types.StringNull(),
+		RotateTSClientSecret: types.StringNull(),
+		Instances:            types.SetNull(types.StringType),
+		ID:                   types.StringNull(),
+		OrganizationID:       types.StringNull(),
+		Hostname:             types.StringNull(),
+		AccessProvider:       types.StringNull(),
+		State:                types.StringNull(),
+		StatusMessage:        types.StringNull(),
+		MonthlyCents:         types.Int64Null(),
+		ProvisionedAt:        types.StringNull(),
+		TokenSetAt:           types.StringNull(),
+		ClaimedDomains:       types.ListNull(types.StringType),
 	}
 	for _, m := range mutators {
 		m(&data)

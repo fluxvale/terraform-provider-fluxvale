@@ -37,9 +37,9 @@ lives next door in
 - **1 backups row per instance** — endpoint composed from the
   Cloudflare account id, bucket from the TF-created bucket, per
   instance prefix and retention.
-- **The access gateway** — joins the tailnet (the platform mints its
-  join key from the Tailscale API token below — nothing pasted into
-  the admin console), attaches every
+- **The access gateway** — joins the tailnet (the platform exchanges
+  the OAuth client pair below and mints its join key — nothing pasted
+  into the admin console), attaches every
   `exposure = "private"` instance (the attach waits for the gateway
   to become active).
 - **Custom-domain registrations per instance**
@@ -66,12 +66,17 @@ instance.
 | `r2_access_key_id` / `r2_secret_access_key` | Cloudflare dashboard → R2 → Manage API Tokens (object read/write) | `terraform.tfvars` |
 | `r2_bucket_name` | decision — default `fluxvale-backups`, unique in the account | optional, `terraform.tfvars` |
 | `tailnet_domain` | Tailscale admin console — the MagicDNS suffix (`<tailnet>.ts.net`) | `terraform.tfvars` |
-| `tailscale_api_token` | Tailscale admin console → Keys → Generate API token, from a tailnet owner/admin account (console tokens carry the account's full permissions — no scope selection; that is what lets the platform mint the gateway's join key) | `export TF_VAR_tailscale_api_token=…` — **only** the environment, never a file, never `terraform.tfvars` (like `FLUXVALE_PAT`) |
+| `tailscale_client_id` | Tailscale admin console → Settings → OAuth clients — generate one client with the scopes the platform needs (`auth_keys`, `dns`, `devices:routes` write, `devices:core:read`), scoped to the `fluxvale-gateway` tag (the platform's minted join keys carry that tag, so the client's tags must include it or the join fails) | `terraform.tfvars` — the client id is public identity, not a secret |
+| `tailscale_client_secret` | the same OAuth client — the secret is shown ONCE at creation (store it in your secret manager immediately) | `export TF_VAR_tailscale_client_secret=…` — **only** the environment, never a file, never `terraform.tfvars` (like `FLUXVALE_PAT`) |
 | `instances` | the catalog (listing one-liner below) + app/version/size choices | optional, `terraform.tfvars` |
 | `instances[].domain` | the dogfood plan — `git.fluxvale.com` (forgejo) and `analytics.fluxvale.com` (umami) are the placeholder pairings | optional, `terraform.tfvars` — left unset until that plan lands |
 
-The token scopes match the workflow's acceptance preflight
-(`.github/workflows/acceptance.yml`); mint once, reuse.
+The OAuth client's scopes match the workflow's acceptance preflight
+(`.github/workflows/acceptance.yml`); mint once, reuse. The client id
+may live in `terraform.tfvars` (it is not a secret); the secret is
+env-only — and rotating it later is one gesture in the stack: export
+the fresh `TF_VAR_tailscale_client_secret` and bump
+`rotate_ts_client_secret_on` on the gateway resource.
 
 To see the catalog while picking apps and version pins (after
 `tofu init` and with `FLUXVALE_PAT` exported — the console reads the
@@ -162,7 +167,7 @@ accepted design, not a shipped fallback — do not rely on it yet.
 cd examples/owner-stack
 cp terraform.tfvars.example terraform.tfvars   # then fill it in
 export FLUXVALE_PAT=fvpat_…                    # never in a file
-export TF_VAR_tailscale_api_token=…            # never in a file (like FLUXVALE_PAT)
+export TF_VAR_tailscale_client_secret=…        # never in a file (like FLUXVALE_PAT)
 export TF_VAR_state_passphrase=…               # from the keychain/secret manager
 tofu init                                      # registry defaults (fluxvale + cloudflare); mirror optional
 tofu plan

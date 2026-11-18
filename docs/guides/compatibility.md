@@ -87,5 +87,25 @@ renames and no changed attribute semantics — the stable names above are
 untouched, and existing `auth_key` configurations keep working as
 before.
 
+## Gateway OAuth client pair (from 0.7.0)
+
+From 0.7.0, `fluxvale_access_gateway` gains `ts_client_id` (plain —
+public identity, kept in state), `ts_client_secret` (write-only,
+sensitive), and `rotate_ts_client_secret_on` — the PREFERRED enrollment
+credential: an OAuth client created in the Tailscale admin console
+(Settings → OAuth clients) carrying the scopes the platform needs
+(`auth_keys`, `dns`, `devices:routes` write, `devices:core:read`) and
+the `fluxvale-gateway` tag. The platform exchanges the pair for a
+short-lived, tailnet-scoped token and mints the join key from it; the
+secret is never a direct Bearer. No renames: `api_token` (the
+console-token alternate) and `auth_key` (the legacy fallback) keep
+their names and semantics, and every stable name above is untouched.
+`ts_client_secret` uses the write-only mechanics — **Terraform 1.12+
+or OpenTofu 1.13+**, in a provider release containing the attribute; on
+an older CLI, leave the pair out and paste it in the panel. The value
+never enters state or plan; rotating it is a trigger bump
+(`rotate_ts_client_secret_on`), an in-place PATCH — never a
+replacement.
+
 **1.0 freeze**: when the first non-owner user writes `.tf` against this
 provider. From then on, removals and renames are versioned decisions.

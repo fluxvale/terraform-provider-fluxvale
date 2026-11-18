@@ -55,6 +55,38 @@ func TestGatewayTokenSchemaFlags(t *testing.T) {
 			trigger.Optional, trigger.Sensitive, trigger.WriteOnly)
 	}
 
+	// The lane-B pair (#836): the id is plain public identity; the
+	// secret carries the api_token posture exactly (sensitive +
+	// write-only); the trigger is a plain optional string.
+	pairID, ok := sch.Attributes["ts_client_id"].(schema.StringAttribute)
+	if !ok {
+		t.Fatalf("ts_client_id is %T, want schema.StringAttribute", sch.Attributes["ts_client_id"])
+	}
+	if !pairID.Optional || pairID.Sensitive || pairID.WriteOnly {
+		t.Errorf("ts_client_id Optional/Sensitive/WriteOnly = %v/%v/%v, want a plain optional input (public identity)",
+			pairID.Optional, pairID.Sensitive, pairID.WriteOnly)
+	}
+	pairSecret, ok := sch.Attributes["ts_client_secret"].(schema.StringAttribute)
+	if !ok {
+		t.Fatalf("ts_client_secret is %T, want schema.StringAttribute", sch.Attributes["ts_client_secret"])
+	}
+	if !pairSecret.Optional || pairSecret.Required || pairSecret.Computed {
+		t.Errorf("ts_client_secret Optional/Required/Computed = %v/%v/%v, want optional input only",
+			pairSecret.Optional, pairSecret.Required, pairSecret.Computed)
+	}
+	if !pairSecret.Sensitive || !pairSecret.WriteOnly {
+		t.Errorf("ts_client_secret Sensitive/WriteOnly = %v/%v, want both (no state/plan value)",
+			pairSecret.Sensitive, pairSecret.WriteOnly)
+	}
+	pairTrigger, ok := sch.Attributes["rotate_ts_client_secret_on"].(schema.StringAttribute)
+	if !ok {
+		t.Fatalf("rotate_ts_client_secret_on is %T, want schema.StringAttribute", sch.Attributes["rotate_ts_client_secret_on"])
+	}
+	if !pairTrigger.Optional || pairTrigger.Sensitive || pairTrigger.WriteOnly {
+		t.Errorf("rotate_ts_client_secret_on Optional/Sensitive/WriteOnly = %v/%v/%v, want a plain optional trigger",
+			pairTrigger.Optional, pairTrigger.Sensitive, pairTrigger.WriteOnly)
+	}
+
 	stamp, ok := sch.Attributes["token_set_at"].(schema.StringAttribute)
 	if !ok || !stamp.Computed {
 		t.Error("token_set_at is not a computed string")
@@ -407,5 +439,217 @@ func TestGatewayCreateUnknownTokenIsRefused(t *testing.T) {
 
 	if hasRequest(f, http.MethodPost, "/api/v1/access-gateways") {
 		t.Error("an unknown token still POSTed the gateway")
+	}
+}
+
+// The lane-B pair's rotation: a changed rotate_ts_client_secret_on
+// re-sends BOTH halves in place through the credential PATCH — the
+// client id from the plan, the current write-only secret from the
+// config. An unchanged trigger never re-sends, and a changed trigger
+// without the secret is refused before the PATCH (the write-only
+// value cannot be read back).
+func TestGatewayUpdateClientPairRotationTrigger(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	f.gatewayGets = []scriptedResponse{
+		script(200, gatewayActiveDoc),    // pre-read
+		script(200, gatewayTokenFullDoc), // singleton read after the PATCH
+		script(200, gatewayTokenFullDoc), // final read
+	}
+	r.pd = f.testClient()
+
+	state := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.ID = types.StringValue("gw-1")
+		d.Organization = types.StringValue("org-1")
+		d.OrganizationID = types.StringValue("org-1")
+		d.Hostname = types.StringValue("fv-0a1b2c3d")
+		d.AccessProvider = types.StringValue("tailscale")
+		d.State = types.StringValue("active")
+		d.MonthlyCents = types.Int64Value(500)
+		d.TSClientID = types.StringValue("k1234567890abcdef")
+		d.RotateTSClientSecret = types.StringValue("r1")
+	})
+
+	plan := state
+	plan.RotateTSClientSecret = types.StringValue("r2")
+
+	req := resource.UpdateRequest{
+		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &plan)},
+		State:  tfsdk.State{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &state)},
+		Config: gatewayConfigFor(ctx, t, sch, &plan),
+	}
+	// The write-only secret rides the config only.
+	req.Config.Raw = gatewayToRaw(ctx, t, sch, func() *gatewayModel {
+		d := plan
+		d.TSClientSecret = types.StringValue("tskey-client-ROTATED")
+		return &d
+	}())
+
+	resp := &resource.UpdateResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	r.Update(ctx, req, resp)
+	assertNoErrors(t, &resp.Diagnostics)
+
+	patch := findOne(t, f.all(), http.MethodPatch, "/api/v1/access-gateways/gw-1/api-token")
+	attrs := attrsOf(t, patch)
+	if attrs["ts_client_id"] != "k1234567890abcdef" || attrs["ts_client_secret"] != "tskey-client-ROTATED" {
+		t.Errorf("PATCH pair = %v, want both halves re-sent in place", attrs)
+	}
+	if _, ok := attrs["api_token"]; ok {
+		t.Errorf("PATCH api_token = %v, want absent — one shape per save", attrs["api_token"])
+	}
+
+	// The write-only secret never lands in state.
+	got := rawToGateway(ctx, t, sch, resp.State.Raw)
+	if !got.TSClientSecret.IsNull() {
+		t.Errorf("ts_client_secret in state = %q, want null (write-only)", got.TSClientSecret.ValueString())
+	}
+	if got.RotateTSClientSecret.ValueString() != "r2" {
+		t.Errorf("rotate_ts_client_secret_on = %q, want the changed trigger", got.RotateTSClientSecret.ValueString())
+	}
+}
+
+func TestGatewayUpdateClientPairUnchangedTriggerDoesNotPatch(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	f.gatewayGets = []scriptedResponse{
+		script(200, gatewayActiveDoc),
+		script(200, gatewayActiveDoc),
+	}
+	r.pd = f.testClient()
+
+	state := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.ID = types.StringValue("gw-1")
+		d.Organization = types.StringValue("org-1")
+		d.OrganizationID = types.StringValue("org-1")
+		d.Hostname = types.StringValue("fv-0a1b2c3d")
+		d.AccessProvider = types.StringValue("tailscale")
+		d.State = types.StringValue("active")
+		d.MonthlyCents = types.Int64Value(500)
+		d.TSClientID = types.StringValue("k1234567890abcdef")
+		d.RotateTSClientSecret = types.StringValue("r1")
+	})
+
+	plan := state
+	req := resource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &plan)},
+		State: tfsdk.State{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &state)},
+		Config: gatewayConfigFor(ctx, t, sch, func() *gatewayModel {
+			d := plan
+			d.TSClientSecret = types.StringValue("tskey-client-SAME")
+			return &d
+		}()),
+	}
+	resp := &resource.UpdateResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	r.Update(ctx, req, resp)
+	assertNoErrors(t, &resp.Diagnostics)
+
+	if hasRequest(f, http.MethodPatch, "/api/v1/access-gateways/gw-1/api-token") {
+		t.Error("an unchanged pair rotation trigger re-sent the secret")
+	}
+}
+
+func TestGatewayUpdateClientPairRotationWithoutSecretIsRefused(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	f.gatewayGets = []scriptedResponse{script(200, gatewayActiveDoc)}
+	r.pd = f.testClient()
+
+	state := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.ID = types.StringValue("gw-1")
+		d.Organization = types.StringValue("org-1")
+		d.OrganizationID = types.StringValue("org-1")
+		d.Hostname = types.StringValue("fv-0a1b2c3d")
+		d.AccessProvider = types.StringValue("tailscale")
+		d.State = types.StringValue("active")
+		d.MonthlyCents = types.Int64Value(500)
+		d.TSClientID = types.StringValue("k1234567890abcdef")
+		d.RotateTSClientSecret = types.StringValue("r1")
+	})
+
+	plan := state
+	plan.RotateTSClientSecret = types.StringValue("r2")
+
+	req := resource.UpdateRequest{
+		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &plan)},
+		State:  tfsdk.State{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &state)},
+		Config: gatewayConfigFor(ctx, t, sch, &plan),
+	}
+	resp := &resource.UpdateResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	r.Update(ctx, req, resp)
+	assertError(t, &resp.Diagnostics, "ts_client_secret is required to rotate")
+
+	if hasRequest(f, http.MethodPatch, "/api/v1/access-gateways/gw-1/api-token") {
+		t.Error("a pair rotation without the secret still PATCHed")
+	}
+}
+
+// A rotation whose config carries no client id falls back to the
+// state's id — "re-send the current pair" means the stored identity
+// with the fresh secret; both halves ride the PATCH.
+func TestGatewayUpdateClientPairRotationUsesStateIDFallback(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	f.gatewayGets = []scriptedResponse{
+		script(200, gatewayActiveDoc),    // pre-read
+		script(200, gatewayTokenFullDoc), // singleton read after the PATCH
+		script(200, gatewayTokenFullDoc), // final read
+	}
+	r.pd = f.testClient()
+
+	state := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.ID = types.StringValue("gw-1")
+		d.Organization = types.StringValue("org-1")
+		d.OrganizationID = types.StringValue("org-1")
+		d.Hostname = types.StringValue("fv-0a1b2c3d")
+		d.AccessProvider = types.StringValue("tailscale")
+		d.State = types.StringValue("active")
+		d.MonthlyCents = types.Int64Value(500)
+		d.TSClientID = types.StringValue("k1234567890abcdef")
+		d.RotateTSClientSecret = types.StringValue("r1")
+	})
+
+	plan := state
+	plan.TSClientID = types.StringNull() // the config left the id off
+	plan.RotateTSClientSecret = types.StringValue("r2")
+
+	req := resource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &plan)},
+		State: tfsdk.State{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &state)},
+		Config: gatewayConfigFor(ctx, t, sch, func() *gatewayModel {
+			d := plan
+			d.TSClientSecret = types.StringValue("tskey-client-ROTATED")
+			return &d
+		}()),
+	}
+	resp := &resource.UpdateResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	r.Update(ctx, req, resp)
+	assertNoErrors(t, &resp.Diagnostics)
+
+	if attrs := attrsOf(t, findOne(t, f.all(), http.MethodPatch, "/api/v1/access-gateways/gw-1/api-token")); attrs["ts_client_id"] != "k1234567890abcdef" {
+		t.Errorf("PATCH ts_client_id = %v, want the state's id riding the rotation", attrs["ts_client_id"])
 	}
 }
