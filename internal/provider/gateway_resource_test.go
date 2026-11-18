@@ -1011,21 +1011,36 @@ func TestGatewayModifyPlanRejectsSecretPresenceChange(t *testing.T) {
 
 	deployed := testGateway(func(d *gatewayModel) { d.ID = types.StringValue("gw-1") })
 	cases := []struct {
-		name    string
-		planMut func(d *gatewayModel)
+		name     string
+		planMut  func(d *gatewayModel)
+		stateMut func(d *gatewayModel)
 	}{
-		{"added over an imported null", func(d *gatewayModel) { d.TSClientSecret = types.StringValue("tskey-client-NEW") }},
-		{"changed", func(d *gatewayModel) { d.TSClientSecret = types.StringValue("tskey-client-OTHER") }},
+		{"added over an imported null", func(d *gatewayModel) { d.TSClientSecret = types.StringValue("tskey-client-NEW") }, nil},
+		{"changed", func(d *gatewayModel) { d.TSClientSecret = types.StringValue("tskey-client-OTHER") }, nil},
+		// The removed direction — the auth_key precedent's third case
+		// (#19 review): a state that carried the secret against a plan
+		// that drops it plans the same rejected replacement.
+		{
+			"removed",
+			func(d *gatewayModel) { d.TSClientSecret = types.StringNull() },
+			func(d *gatewayModel) { d.TSClientSecret = types.StringValue("tskey-client-OLD") },
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// The crafted plan differs from the null-carrying state
-			// only in the write-only secret's presence.
+			// The crafted plan differs from the state only in the
+			// write-only secret's presence (the stateMut shapes the
+			// carried-secret side; default state carries null).
+			stateData := testGateway(func(d *gatewayModel) { d.ID = types.StringValue("gw-1") })
+			if tc.stateMut != nil {
+				tc.stateMut(&stateData)
+			}
+
 			planData := testGateway(func(d *gatewayModel) { d.ID = types.StringValue("gw-1") })
 			tc.planMut(&planData)
 			req := resource.ModifyPlanRequest{
 				Plan:  tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
-				State: tfsdk.State{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &deployed)},
+				State: tfsdk.State{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &stateData)},
 			}
 			resp := &resource.ModifyPlanResponse{Plan: tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)}}
 			r.ModifyPlan(ctx, req, resp)
@@ -1304,6 +1319,50 @@ func TestGatewayCreateSurfacesMixedPairRefusalsVerbatim(t *testing.T) {
 				t.Errorf("state = %v, want null — the 400 is a pre-create refusal, nothing was created", resp.State.Raw)
 			}
 		})
+	}
+}
+
+// The #19 review's masking case: the org ALREADY has a matching row
+// (the normal state after this resource's state-only destroy), and the
+// config carries a mixed shape. The 400 must surface verbatim — the
+// adoption probe is for the singleton 409, and an adoption warning over
+// a refused create would claim a credential was stored that never was.
+func TestGatewayCreateMixedRefusalBeatsAdoption(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	// The row EXISTS: a matching singleton would be adoptable if the
+	// POST had been refused for the identity conflict instead. The
+	// fake's own contract logic 400s the mixed body — no scripted
+	// status needed.
+	f.gatewayGets = []scriptedResponse{script(200, gatewayActiveDoc)}
+	r.pd = f.testClient()
+
+	planData := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.APIToken = types.StringValue("tskey-api-ALSO-SET")
+		d.TSClientID = types.StringValue("k1234567890abcdef")
+		d.TSClientSecret = types.StringValue("tskey-client-SECRET")
+	})
+	req := resource.CreateRequest{
+		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+		Config: gatewayConfigFor(ctx, t, sch, &planData),
+	}
+	resp := &resource.CreateResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	r.Create(ctx, req, resp)
+
+	assertError(t, &resp.Diagnostics, "Unable to create the access gateway", gatewayRefusalMixedCredential)
+	for _, d := range resp.Diagnostics {
+		if strings.Contains(d.Detail(), "adopt") || strings.Contains(d.Summary(), "Adopted") {
+			t.Errorf("adoption warning over a refused create: %v", d)
+		}
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Errorf("state = %v, want null — the 400 is a pre-create refusal", resp.State.Raw)
 	}
 }
 

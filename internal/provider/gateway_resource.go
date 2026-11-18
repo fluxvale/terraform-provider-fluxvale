@@ -441,6 +441,18 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 	gw, err := pd.client.CreateGateway(ctx, createInput)
 	if err != nil {
+		// A field-scoped 400 (a mixed or lone-half credential shape) is
+		// the config's own refusal: surface it verbatim and stop. The
+		// adoption probe below exists for the singleton-conflict 409 —
+		// letting it run on a 400 would swallow the honest sentence and
+		// emit a "credential was stored" adoption warning over a create
+		// that was REFUSED (#19 review: nothing was minted or stored).
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest {
+			resp.Diagnostics.AddError("Unable to create the access gateway", err.Error())
+			return
+		}
+
 		// The likeliest refusal is the org's unique-organization
 		// identity — the singleton may already exist. Probe before
 		// failing: a matching row is adopted, a diverging one is named.
