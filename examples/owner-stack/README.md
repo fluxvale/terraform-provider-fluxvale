@@ -37,7 +37,9 @@ lives next door in
 - **1 backups row per instance** — endpoint composed from the
   Cloudflare account id, bucket from the TF-created bucket, per
   instance prefix and retention.
-- **The access gateway** — joins the tailnet, attaches every
+- **The access gateway** — joins the tailnet (the platform mints its
+  join key from the Tailscale API token below — nothing pasted into
+  the admin console), attaches every
   `exposure = "private"` instance (the attach waits for the gateway
   to become active).
 - **Custom-domain registrations per instance**
@@ -64,7 +66,7 @@ instance.
 | `r2_access_key_id` / `r2_secret_access_key` | Cloudflare dashboard → R2 → Manage API Tokens (object read/write) | `terraform.tfvars` |
 | `r2_bucket_name` | decision — default `fluxvale-backups`, unique in the account | optional, `terraform.tfvars` |
 | `tailnet_domain` | Tailscale admin console — the MagicDNS suffix (`<tailnet>.ts.net`) | `terraform.tfvars` |
-| `tailscale_auth_key` | Tailscale admin console → Settings → Keys (an auth key that can enroll a device) | `terraform.tfvars` — set BEFORE the first apply when enabling (with it null, the apply half-lands: bucket, instances, backups, then fails at the gateway create); leave null only when adopting an existing gateway by import |
+| `tailscale_api_token` | Tailscale admin console → Keys → Generate API token (scopes: `dns devices:routes devices:core:read auth_keys` — mint it from a tailnet owner/admin account; `auth_keys` is what lets the platform mint the gateway's join key) | `export TF_VAR_tailscale_api_token=…` — **only** the environment, never a file, never `terraform.tfvars` (like `FLUXVALE_PAT`) |
 | `instances` | the catalog (listing one-liner below) + app/version/size choices | optional, `terraform.tfvars` |
 | `instances[].domain` | the dogfood plan — `git.fluxvale.com` (forgejo) and `analytics.fluxvale.com` (umami) are the placeholder pairings | optional, `terraform.tfvars` — left unset until that plan lands |
 
@@ -160,6 +162,7 @@ accepted design, not a shipped fallback — do not rely on it yet.
 cd examples/owner-stack
 cp terraform.tfvars.example terraform.tfvars   # then fill it in
 export FLUXVALE_PAT=fvpat_…                    # never in a file
+export TF_VAR_tailscale_api_token=…            # never in a file (like FLUXVALE_PAT)
 export TF_VAR_state_passphrase=…               # from the keychain/secret manager
 tofu init                                      # registry defaults (fluxvale + cloudflare); mirror optional
 tofu plan
@@ -197,8 +200,8 @@ Two honest caveats: **the gateway is an org singleton that bills
 monthly, needs the org wallet paid AND funded, and has no API
 delete** — destroy removes it from state only; opt out via the
 panel's Access tab. It applies unconditionally, so remove the
-resource to skip it entirely; to adopt an existing gateway, set
-`tailscale_auth_key` null first, then
+resource to skip it entirely; to adopt an existing gateway, import it —
+neither credential is needed:
 `terraform import fluxvale_access_gateway.owner <org_id_or_slug>`.
 And **backups need the org to have paid once** — a 403 on the first
 backups save is the wallet, not a bug.

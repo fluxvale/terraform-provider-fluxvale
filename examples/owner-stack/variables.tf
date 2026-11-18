@@ -61,10 +61,11 @@ variable "tailnet_domain" {
   type        = string
 }
 
-variable "tailscale_auth_key" {
-  description = "Tailscale auth key the gateway joins the tailnet with (write-only; required to ENABLE the gateway). Null when ADOPTING an existing gateway by import — any value here after an import plans a replacement, and gateway replacements are rejected."
+variable "tailscale_api_token" {
+  description = "The Tailscale API access token (dns, devices:routes, devices:core:read, auth_keys scopes — minted from a tailnet owner/admin account). Write-only: never enters state or plan; the platform mints the gateway's join key from it."
   type        = string
   sensitive   = true
+  ephemeral   = true
   default     = null
 }
 
