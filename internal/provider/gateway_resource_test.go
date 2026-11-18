@@ -214,13 +214,22 @@ func TestGatewayCreateMintsFromApiToken(t *testing.T) {
 
 	f := newFakeAPI(t)
 	f.orgsDoc = soleOrgDoc()
-	f.gatewayGets = []scriptedResponse{script(200, gatewayProvisioningDoc)} // the final read only — no save wait
+	// The wait for :active (provisioning, then active) plus the final
+	// read — the mint path KEEPS the pre-attach wait; only the token
+	// save's own wait/PATCH is skipped.
+	f.gatewayGets = []scriptedResponse{
+		script(200, gatewayProvisioningDoc),
+		script(200, gatewayActiveDoc),
+	}
 	r.pd = f.testClient()
 
 	planData := testGateway(func(d *gatewayModel) {
 		d.AuthKey = types.StringNull()
 		d.APIToken = types.StringValue("tskey-api-MINT-secret")
 		d.RotateAPIToken = types.StringValue("v1")
+		// An attachment forces the pre-attach wait — pinning that the
+		// mint path did not gate it away (the hostile-review nit).
+		d.Instances = setInput(t, "inst-a")
 	})
 	req := resource.CreateRequest{
 		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
@@ -242,6 +251,23 @@ func TestGatewayCreateMintsFromApiToken(t *testing.T) {
 	}
 	if hasRequest(f, http.MethodPatch, "/api/v1/access-gateways/gw-1/api-token") {
 		t.Error("the mint path ran the after-active token PATCH — the platform stores the token at create")
+	}
+
+	// The pre-attach wait survives the mint path: the first singleton
+	// GET (the wait's poll) precedes the first attach POST — the same
+	// ordering pin TestGatewayCreateAttachesAfterActive carries, so a
+	// future refactor gating the wait on !mint cannot pass silently.
+	firstGet, firstAttach := -1, -1
+	for i, req := range f.all() {
+		if req.method == http.MethodGet && strings.HasSuffix(req.path, "/access-gateway") && firstGet < 0 {
+			firstGet = i
+		}
+		if req.method == http.MethodPost && strings.HasSuffix(req.path, "/attachments") && firstAttach < 0 {
+			firstAttach = i
+		}
+	}
+	if firstGet < 0 || firstAttach < 0 || firstAttach < firstGet {
+		t.Fatalf("mint sequence wrong: first GET %d, first attach %d — the wait before attach is part of the mint contract", firstGet, firstAttach)
 	}
 
 	got := rawToGateway(ctx, t, sch, resp.State.Raw)
