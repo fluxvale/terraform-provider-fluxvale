@@ -1,9 +1,10 @@
 # Copy to terraform.tfvars and fill in your real values (the copy is
 # gitignored — this directory's .gitignore). The FluxVale PAT does NOT
 # go in this file: export FLUXVALE_PAT instead (README.md). The
-# Tailscale API token does NOT go here either: export
-# TF_VAR_tailscale_api_token instead. Placeholder strings fail the
-# providers' format checks — expected until filled.
+# Tailscale OAuth client SECRET does NOT go here either: export
+# TF_VAR_tailscale_client_secret instead — the client ID is public
+# identity and rides the tailscale_client_id row below. Placeholder
+# strings fail the providers' format checks — expected until filled.
 
 # The state/plan encryption passphrase is NOT in this file: export
 # TF_VAR_state_passphrase from the keychain or a secret manager
@@ -18,7 +19,8 @@ r2_bucket_name        = "fluxvale-backups" # any name unique in the account
 r2_access_key_id      = "REPLACE_ME_R2_ACCESS_KEY_ID"
 r2_secret_access_key  = "REPLACE_ME_R2_SECRET_ACCESS_KEY"
 
-tailnet_domain = "REPLACE-ME.ts.net" # the tailnet's MagicDNS suffix
+tailnet_domain     = "REPLACE-ME.ts.net"  # the tailnet's MagicDNS suffix
+tailscale_client_id = "REPLACE_ME_TS_CLIENT_ID" # the OAuth client's id (public — tfvars is fine)
 
 # The instances, keyed by name (= the backups prefix). The default
 # three below are the skeleton's representative shapes — override the

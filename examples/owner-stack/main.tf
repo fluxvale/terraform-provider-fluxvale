@@ -187,16 +187,26 @@ resource "fluxvale_custom_domain" "apps" {
 # private instances it still creates and bills — remove this resource
 # to skip it. If the org already has one, ADOPT it by import —
 # neither credential is needed (an import reads the existing gateway;
-# leave the token unset): `terraform import
+# leave the pair unset): `terraform import
 # fluxvale_access_gateway.owner <org_id_or_slug>`.
 resource "fluxvale_access_gateway" "owner" {
   tailnet_domain = var.tailnet_domain
 
-  # Write-only: the platform mints the gateway's join key from this
-  # token (ephemeral var; the pairing checklist in README.md) —
-  # nothing pasted in the Tailscale admin console. Null on an
-  # adopt-by-import.
-  api_token = var.tailscale_api_token
+  # The OAuth client pair — the preferred credential: the platform
+  # exchanges it for a short-lived, tailnet-scoped token and mints the
+  # gateway's join key from that (nothing pasted in the Tailscale
+  # admin console; the pairing checklist in README.md covers the
+  # client's scopes and tag). The client id is public identity and
+  # rides terraform.tfvars; the secret is the ephemeral var, env-only
+  # like FLUXVALE_PAT. Both null on an adopt-by-import.
+  ts_client_id     = var.tailscale_client_id
+  ts_client_secret = var.tailscale_client_secret
+
+  # Rotation: the write-only secret cannot produce a plan diff — bump
+  # rotate_ts_client_secret_on (set it to a new nonce, and export the
+  # fresh TF_VAR_tailscale_client_secret) to re-send the pair in
+  # place. Moving to a whole new OAuth client is the same gesture:
+  # set the new id + secret and bump the trigger.
 
   # Uncomment once the gateway exists (org slug or id): an unset
   # organization re-plans unknown against the stored id and shows a

@@ -61,8 +61,14 @@ variable "tailnet_domain" {
   type        = string
 }
 
-variable "tailscale_api_token" {
-  description = "The Tailscale API access token, minted from a tailnet owner/admin account (console tokens carry the account's full permissions). Write-only: never enters state or plan; the platform mints the gateway's join key from it."
+variable "tailscale_client_id" {
+  description = "The Tailscale OAuth client id (admin console → Settings → OAuth clients) — the public half of the trust credential the platform exchanges for a tailnet-scoped token before minting the gateway's join key. NOT a secret: it may ride terraform.tfvars. Create the client with the scopes the platform needs (auth_keys, dns, devices:routes write, devices:core:read) and the fluxvale-gateway tag — the minted join key carries that tag, so the client's tags must include it."
+  type        = string
+  default     = null
+}
+
+variable "tailscale_client_secret" {
+  description = "The Tailscale OAuth client secret — shown once when the client is created. Write-only: never enters state or plan (the platform exchanges the pair; the secret is never a direct Bearer). Leave null and export TF_VAR_tailscale_client_secret — it never belongs in a file."
   type        = string
   sensitive   = true
   ephemeral   = true

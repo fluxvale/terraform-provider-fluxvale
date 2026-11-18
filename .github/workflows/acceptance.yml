@@ -35,6 +35,17 @@
 #     tailnet owner/admin account (console tokens are fully permitted; no scope
 #     selection — the account's permissions authorize the
 #     platform's join-key mint).
+#   - TF_ACC_TAILNET_DOMAIN/TF_ACC_TAILSCALE_CLIENT_ID/
+#     TF_ACC_TAILSCALE_CLIENT_SECRET — the #836 lane-B pair gateway
+#     class (the OAuth client pair; the platform exchanges it for a
+#     tailnet-scoped token and mints the join key). Same
+#     standing-charge caveat as above. The value is an OAuth client
+#     from the admin console (Settings → OAuth clients) carrying the
+#     platform scopes (auth_keys, dns, devices:routes write,
+#     devices:core:read) and the fluxvale-gateway tag. BOTH repo
+#     secrets must be created — TAILSCALE_CLIENT_ID (plain) and
+#     TAILSCALE_CLIENT_SECRET — until they exist this resolves to
+#     empty and the pair class skips (like the other optional tiers).
 #   - TF_ACC_DOMAIN — the custom domain class.
 #   - TF_ACC_POCKET_ID_INSTANCE_ID — the PocketID SSO class (the
 #     PocketID instance id; public + custody-ready, flag on). Optional
@@ -144,6 +155,16 @@ jobs:
           # must be created; until it exists this resolves to empty
           # and the mint class skips (like the other optional tiers).
           TF_ACC_TAILSCALE_API_TOKEN: ${{ secrets.TAILSCALE_API_TOKEN }}
+          # The #836 lane-B pair class: a Tailscale OAuth client — the
+          # preferred trust credential (scopes auth_keys, dns,
+          # devices:routes write, devices:core:read; tag
+          # fluxvale-gateway). The client id is public identity and
+          # rides the plain secret TAILSCALE_CLIENT_ID; the client
+          # secret rides TAILSCALE_CLIENT_SECRET. Both secrets must be
+          # created; until they exist these resolve to empty and the
+          # pair class skips (like the other optional tiers).
+          TF_ACC_TAILSCALE_CLIENT_ID: ${{ secrets.TAILSCALE_CLIENT_ID }}
+          TF_ACC_TAILSCALE_CLIENT_SECRET: ${{ secrets.TAILSCALE_CLIENT_SECRET }}
           TF_ACC_DOMAIN: ${{ secrets.TF_ACC_DOMAIN }}
           TF_ACC_POCKET_ID_INSTANCE_ID: ${{ secrets.TF_ACC_POCKET_ID_INSTANCE_ID }}
           TF_ACC_SSO_APP_SLUG: ${{ secrets.TF_ACC_SSO_APP_SLUG }}

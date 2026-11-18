@@ -131,8 +131,10 @@ func TestGatewayCreateBodyShapeAndState(t *testing.T) {
 }
 
 // A fresh create with NO credential at all is refused before any HTTP
-// call — the wire takes auth_key or api_token only at create and never
-// echoes either, so there is no later save to supply one.
+// call — the wire takes exactly one of the three enrollment shapes
+// (the OAuth client pair, api_token, auth_key) only at create and
+// never echoes any of them, so there is no later save to supply one.
+// The refusal names all three shapes — the pair first (preferred).
 func TestGatewayCreateRequiresACredential(t *testing.T) {
 	ctx := context.Background()
 	r, sch := newSchemadGateway(ctx, t)
@@ -144,6 +146,8 @@ func TestGatewayCreateRequiresACredential(t *testing.T) {
 	planData := testGateway(func(d *gatewayModel) {
 		d.AuthKey = types.StringNull()
 		d.APIToken = types.StringNull()
+		d.TSClientID = types.StringNull()
+		d.TSClientSecret = types.StringNull()
 	})
 	req := resource.CreateRequest{
 		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
@@ -155,7 +159,8 @@ func TestGatewayCreateRequiresACredential(t *testing.T) {
 	r.Create(ctx, req, resp)
 
 	assertError(t, &resp.Diagnostics,
-		"auth_key or api_token is required to enable a gateway",
+		"ts_client_id and ts_client_secret, api_token, or auth_key is required to enable a gateway",
+		"ts_client_id and ts_client_secret, the preferred shape",
 		"the platform mints the join key from it",
 		"tailnet owner/admin account",
 		"the legacy two-paste path",
@@ -366,7 +371,9 @@ func TestGatewayCreateSurfacesMintRefusalVerbatim(t *testing.T) {
 
 // The fake enforces the #836 one-credential contract the way the
 // platform does, and the client surfaces the pinned sentences verbatim:
-// neither credential → 400 on auth_key, both → 400 on api_token.
+// neither credential → 400 on auth_key, both → 400 on api_token, the
+// pair arms per the lane-B sentences (mixed shapes on ts_client_id, a
+// lone half on its sibling), and a complete pair alone → 201.
 func TestGatewayCreateClientCredentialContract(t *testing.T) {
 	ctx := context.Background()
 	f := newFakeAPI(t)
@@ -384,6 +391,45 @@ func TestGatewayCreateClientCredentialContract(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), gatewayRefusalBothCredentials) {
 		t.Errorf("err = %v, want the both-credentials sentence verbatim", err)
+	}
+
+	// The complete pair beside either other credential: the
+	// mixed-shape sentence, field-scoped on ts_client_id.
+	for _, extra := range []struct {
+		name string
+		in   client.CreateGatewayInput
+	}{
+		{"api_token", client.CreateGatewayInput{
+			TailnetDomain: "example.ts.net", ApiToken: "tskey-api-secret",
+			TsClientID: "k1", TsClientSecret: "s1",
+		}},
+		{"auth_key", client.CreateGatewayInput{
+			TailnetDomain: "example.ts.net", AuthKey: "tskey-test",
+			TsClientID: "k1", TsClientSecret: "s1",
+		}},
+	} {
+		_, err = c.CreateGateway(ctx, extra.in)
+		if err == nil || !strings.Contains(err.Error(), gatewayRefusalMixedCredential) {
+			t.Errorf("pair beside %s: err = %v, want the mixed-shape sentence verbatim", extra.name, err)
+		}
+	}
+
+	// A lone pair half wants its sibling — the sentence rides the
+	// sibling's field.
+	_, err = c.CreateGateway(ctx, client.CreateGatewayInput{TailnetDomain: "example.ts.net", TsClientID: "k1"})
+	if err == nil || !strings.Contains(err.Error(), gatewayRefusalPairHalf) {
+		t.Errorf("err = %v, want the pair-half sentence verbatim", err)
+	}
+	_, err = c.CreateGateway(ctx, client.CreateGatewayInput{TailnetDomain: "example.ts.net", TsClientSecret: "s1"})
+	if err == nil || !strings.Contains(err.Error(), gatewayRefusalPairHalf) {
+		t.Errorf("err = %v, want the pair-half sentence verbatim", err)
+	}
+
+	// The pair alone is the accepted preferred shape: 201, no error.
+	if _, err := c.CreateGateway(ctx, client.CreateGatewayInput{
+		TailnetDomain: "example.ts.net", TsClientID: "k1", TsClientSecret: "s1",
+	}); err != nil {
+		t.Errorf("pair-only create: %v, want the 201", err)
 	}
 }
 
@@ -949,6 +995,72 @@ func TestGatewayModifyPlanRejectsAuthKeyChange(t *testing.T) {
 	}
 }
 
+// The pair secret's presence change is rejected the same way: the
+// write-only secret is null in every real plan and state (the
+// framework nullifies it), so the comparison is a no-op in production
+// — but a plan that ever does carry a different secret presence than
+// state must plan the replacement, and the replacement stays
+// rejected. (The in-process harness crafts the raw values, so the
+// policy pin is exercisable.)
+func TestGatewayModifyPlanRejectsSecretPresenceChange(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t) // no HTTP — ModifyPlan is wire-free
+	r.pd = f.testClient()
+
+	deployed := testGateway(func(d *gatewayModel) { d.ID = types.StringValue("gw-1") })
+	cases := []struct {
+		name     string
+		planMut  func(d *gatewayModel)
+		stateMut func(d *gatewayModel)
+	}{
+		{"added over an imported null", func(d *gatewayModel) { d.TSClientSecret = types.StringValue("tskey-client-NEW") }, nil},
+		{"changed", func(d *gatewayModel) { d.TSClientSecret = types.StringValue("tskey-client-OTHER") }, nil},
+		// The removed direction — the auth_key precedent's third case
+		// (#19 review): a state that carried the secret against a plan
+		// that drops it plans the same rejected replacement.
+		{
+			"removed",
+			func(d *gatewayModel) { d.TSClientSecret = types.StringNull() },
+			func(d *gatewayModel) { d.TSClientSecret = types.StringValue("tskey-client-OLD") },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The crafted plan differs from the state only in the
+			// write-only secret's presence (the stateMut shapes the
+			// carried-secret side; default state carries null).
+			stateData := testGateway(func(d *gatewayModel) { d.ID = types.StringValue("gw-1") })
+			if tc.stateMut != nil {
+				tc.stateMut(&stateData)
+			}
+
+			planData := testGateway(func(d *gatewayModel) { d.ID = types.StringValue("gw-1") })
+			tc.planMut(&planData)
+			req := resource.ModifyPlanRequest{
+				Plan:  tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+				State: tfsdk.State{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &stateData)},
+			}
+			resp := &resource.ModifyPlanResponse{Plan: tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)}}
+			r.ModifyPlan(ctx, req, resp)
+			assertError(t, &resp.Diagnostics, "rejected", "ts_client_secret")
+		})
+	}
+
+	// The real-plan shape: the secret is null on BOTH sides (the
+	// framework nullification) — no rejection, the rotation trigger
+	// is the in-place path.
+	planData := testGateway(func(d *gatewayModel) { d.ID = types.StringValue("gw-1") })
+	req := resource.ModifyPlanRequest{
+		Plan:  tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+		State: tfsdk.State{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &deployed)},
+	}
+	resp := &resource.ModifyPlanResponse{Plan: tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)}}
+	r.ModifyPlan(ctx, req, resp)
+	assertNoErrors(t, &resp.Diagnostics)
+}
+
 // Equal plan and state (and the create/destroy shapes, where there is
 // nothing to compare) plan clean.
 func TestGatewayModifyPlanAllowsNonReplacements(t *testing.T) {
@@ -1064,18 +1176,243 @@ func TestInstanceSetDiff(t *testing.T) {
 	}
 }
 
+// The lane-B pair arm: no auth_key, no api_token — the OAuth client
+// pair rides the CREATE POST (both halves; the platform exchanges it
+// and stores the credential at create), so no after-active PATCH ever
+// runs. The write-only secret never lands in state; the client id —
+// public identity — does, verbatim, and the trigger is restored.
+func TestGatewayCreateMintsFromClientPair(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	// The wait for :active (provisioning, then active) plus the final
+	// read — the pair mint path KEEPS the pre-attach wait, like the
+	// token mint path.
+	f.gatewayGets = []scriptedResponse{
+		script(200, gatewayProvisioningDoc),
+		script(200, gatewayActiveDoc),
+	}
+	r.pd = f.testClient()
+
+	planData := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.APIToken = types.StringNull()
+		d.TSClientID = types.StringValue("k1234567890abcdef")
+		d.TSClientSecret = types.StringValue("tskey-client-SECRET")
+		d.RotateTSClientSecret = types.StringValue("v1")
+		d.Instances = setInput(t, "inst-a")
+	})
+	req := resource.CreateRequest{
+		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+		Config: gatewayConfigFor(ctx, t, sch, &planData),
+	}
+	resp := &resource.CreateResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	r.Create(ctx, req, resp)
+	assertNoErrors(t, &resp.Diagnostics)
+
+	post := findOne(t, f.all(), http.MethodPost, "/api/v1/access-gateways")
+	attrs := attrsOf(t, post)
+	if attrs["ts_client_id"] != "k1234567890abcdef" || attrs["ts_client_secret"] != "tskey-client-SECRET" {
+		t.Errorf("create pair = %v, want both halves riding the POST", attrs)
+	}
+	if _, ok := attrs["api_token"]; ok {
+		t.Errorf("create api_token = %v, want absent — the pair is the only credential", attrs["api_token"])
+	}
+	if attrs["auth_key"] != "" {
+		t.Errorf("create auth_key = %v, want empty — the pair path sends no legacy key", attrs["auth_key"])
+	}
+	if hasRequest(f, http.MethodPatch, "/api/v1/access-gateways/gw-1/api-token") {
+		t.Error("the pair path ran the after-active PATCH — the platform stores the pair at create")
+	}
+
+	got := rawToGateway(ctx, t, sch, resp.State.Raw)
+	// No secret material in state; the client id IS in state (it is
+	// not a secret — drift clarity is the point), pinned verbatim.
+	if !got.TSClientSecret.IsNull() || !got.APIToken.IsNull() || !got.AuthKey.IsNull() {
+		t.Errorf("secret material in state: ts_client_secret/api_token/auth_key = %v/%v/%v, want all null",
+			got.TSClientSecret, got.APIToken, got.AuthKey)
+	}
+	if got.TSClientID.ValueString() != "k1234567890abcdef" {
+		t.Errorf("ts_client_id in state = %q, want the configured id kept verbatim", got.TSClientID.ValueString())
+	}
+	if got.RotateTSClientSecret.ValueString() != "v1" {
+		t.Errorf("rotate_ts_client_secret_on = %q, want the configured trigger restored in state",
+			got.RotateTSClientSecret.ValueString())
+	}
+	if got.ID.ValueString() != "gw-1" {
+		t.Errorf("id = %q, want the created gateway tracked", got.ID.ValueString())
+	}
+}
+
+// Mixed credential shapes go to the wire and the API's field-scoped
+// 400s surface verbatim — the provider maps nothing locally. Pair +
+// api_token and pair + auth_key both hit the mixed-shape sentence; a
+// lone pair half hits the sibling sentence.
+func TestGatewayCreateSurfacesMixedPairRefusalsVerbatim(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	f.gatewayGets = []scriptedResponse{script(http.StatusNotFound, `{"errors": [{"status": "404"}]}`)}
+	r.pd = f.testClient()
+
+	cases := []struct {
+		name    string
+		mut     func(d *gatewayModel)
+		needles []string
+	}{
+		{
+			"pair beside api_token",
+			func(d *gatewayModel) {
+				d.AuthKey = types.StringNull()
+				d.APIToken = types.StringValue("tskey-api-ALSO-SET")
+				d.TSClientID = types.StringValue("k1234567890abcdef")
+				d.TSClientSecret = types.StringValue("tskey-client-SECRET")
+			},
+			[]string{"Unable to create the access gateway", gatewayRefusalMixedCredential},
+		},
+		{
+			"pair beside auth_key",
+			func(d *gatewayModel) {
+				d.AuthKey = types.StringValue("tskey-test")
+				d.TSClientID = types.StringValue("k1234567890abcdef")
+				d.TSClientSecret = types.StringValue("tskey-client-SECRET")
+			},
+			[]string{"Unable to create the access gateway", gatewayRefusalMixedCredential},
+		},
+		{
+			"lone client id",
+			func(d *gatewayModel) {
+				d.AuthKey = types.StringNull()
+				d.TSClientID = types.StringValue("k1234567890abcdef")
+			},
+			[]string{"Unable to create the access gateway", gatewayRefusalPairHalf},
+		},
+		{
+			"lone client secret",
+			func(d *gatewayModel) {
+				d.AuthKey = types.StringNull()
+				d.TSClientSecret = types.StringValue("tskey-client-SECRET")
+			},
+			[]string{"Unable to create the access gateway", gatewayRefusalPairHalf},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f.requests = nil
+			planData := testGateway(tc.mut)
+			req := resource.CreateRequest{
+				Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+				Config: gatewayConfigFor(ctx, t, sch, &planData),
+			}
+			resp := &resource.CreateResponse{
+				State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+			}
+			r.Create(ctx, req, resp)
+			assertError(t, &resp.Diagnostics, tc.needles...)
+			if !resp.State.Raw.IsNull() {
+				t.Errorf("state = %v, want null — the 400 is a pre-create refusal, nothing was created", resp.State.Raw)
+			}
+		})
+	}
+}
+
+// The #19 review's masking case: the org ALREADY has a matching row
+// (the normal state after this resource's state-only destroy), and the
+// config carries a mixed shape. The 400 must surface verbatim — the
+// adoption probe is for the singleton 409, and an adoption warning over
+// a refused create would claim a credential was stored that never was.
+func TestGatewayCreateMixedRefusalBeatsAdoption(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	// The row EXISTS: a matching singleton would be adoptable if the
+	// POST had been refused for the identity conflict instead. The
+	// fake's own contract logic 400s the mixed body — no scripted
+	// status needed.
+	f.gatewayGets = []scriptedResponse{script(200, gatewayActiveDoc)}
+	r.pd = f.testClient()
+
+	planData := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.APIToken = types.StringValue("tskey-api-ALSO-SET")
+		d.TSClientID = types.StringValue("k1234567890abcdef")
+		d.TSClientSecret = types.StringValue("tskey-client-SECRET")
+	})
+	req := resource.CreateRequest{
+		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+		Config: gatewayConfigFor(ctx, t, sch, &planData),
+	}
+	resp := &resource.CreateResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	r.Create(ctx, req, resp)
+
+	assertError(t, &resp.Diagnostics, "Unable to create the access gateway", gatewayRefusalMixedCredential)
+	for _, d := range resp.Diagnostics {
+		if strings.Contains(d.Detail(), "adopt") || strings.Contains(d.Summary(), "Adopted") {
+			t.Errorf("adoption warning over a refused create: %v", d)
+		}
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Errorf("state = %v, want null — the 400 is a pre-create refusal", resp.State.Raw)
+	}
+}
+
+// The unknown write-only client secret is refused before the POST,
+// like the token's posture: skipping an unknown silently would leave
+// the gateway without its credential and no diff to retry.
+func TestGatewayCreateUnknownClientSecretIsRefused(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	r.pd = f.testClient()
+
+	planData := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.TSClientID = types.StringValue("k1234567890abcdef")
+		d.TSClientSecret = types.StringUnknown()
+		d.RotateTSClientSecret = types.StringValue("v1")
+	})
+	req := resource.CreateRequest{
+		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+		Config: gatewayConfigFor(ctx, t, sch, &planData),
+	}
+	resp := &resource.CreateResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	r.Create(ctx, req, resp)
+	assertError(t, &resp.Diagnostics, "ts_client_secret must be known at apply time")
+
+	if hasRequest(f, http.MethodPost, "/api/v1/access-gateways") {
+		t.Error("an unknown client secret still POSTed the gateway")
+	}
+}
+
 // The schema contract: the identity trio replaces (create-only on the
 // wire, with replacements rejected at plan time); auth_key is Optional
 // (Required made every import plan a doomed replacement — the create
 // carries the require-at-enable check instead); organization is
 // Optional+Computed (the import-convergence seed); instances updates
-// live via the pairing verbs; auth_key is sensitive.
+// live via the pairing verbs; auth_key is sensitive; the client pair
+// carries no plan modifiers (pair rotation is an in-place PATCH — a
+// replacement cannot succeed and must never be planned).
 func TestGatewaySchemaContract(t *testing.T) {
 	ctx := context.Background()
 	r, sch := newSchemadGateway(ctx, t)
 
 	want := []string{
 		"organization", "tailnet_domain", "auth_key", "api_token", "rotate_api_token_on",
+		"ts_client_id", "ts_client_secret", "rotate_ts_client_secret_on",
 		"instances", "id", "organization_id", "hostname", "access_provider", "state",
 		"status_message", "monthly_cents", "provisioned_at", "token_set_at", "claimed_domains",
 	}
@@ -1105,11 +1442,19 @@ func TestGatewaySchemaContract(t *testing.T) {
 			t.Errorf("%s has no plan modifiers (want RequiresReplace — create-only on the wire)", name)
 		}
 	}
+	for _, name := range []string{"ts_client_id", "ts_client_secret", "rotate_ts_client_secret_on"} {
+		if len(sch.Attributes[name].(schema.StringAttribute).PlanModifiers) != 0 {
+			t.Errorf("%s has plan modifiers — pair rotation is the in-place PATCH, never a replacement", name)
+		}
+	}
 	if len(sch.Attributes["instances"].(schema.SetAttribute).PlanModifiers) != 0 {
 		t.Error("instances must update in place (the attach/detach verbs)")
 	}
 	if !sch.Attributes["auth_key"].IsSensitive() {
 		t.Error("auth_key is not sensitive")
+	}
+	if sch.Attributes["ts_client_id"].IsSensitive() {
+		t.Error("ts_client_id is sensitive — it is public identity, state-visible for drift clarity")
 	}
 
 	md := &resource.MetadataResponse{}

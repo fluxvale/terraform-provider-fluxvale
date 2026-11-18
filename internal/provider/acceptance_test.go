@@ -39,9 +39,16 @@ import (
 //	                          without the pair (the gateway persists after destroy
 //	                          — no API delete route — and bills monthly)
 //	TF_ACC_TAILNET_DOMAIN + TF_ACC_TAILSCALE_API_TOKEN
-//	                          optional — the #836 mint gateway class skips without
-//	                          the pair (same standing charge; the Tailscale token
+//	                          optional — the #836 mint gateway class skips
+//	                          without the pair (same standing charge; the Tailscale token
 //	                          needs the auth_keys scope)
+//	TF_ACC_TAILNET_DOMAIN + TF_ACC_TAILSCALE_CLIENT_ID +
+//	TF_ACC_TAILSCALE_CLIENT_SECRET
+//	                          optional — the #836 lane-B OAuth-pair gateway
+//	                          class skips without the trio (same standing charge;
+//	                          the OAuth client needs the platform scopes —
+//	                          auth_keys, dns, devices:routes write,
+//	                          devices:core:read — and the fluxvale-gateway tag)
 //	TF_ACC_DOMAIN             optional — the custom-domain test skips without it
 //	TF_ACC_POCKET_ID_INSTANCE_ID
 //	                          optional — the PocketID SSO test skips without it; it
@@ -645,6 +652,77 @@ resource "fluxvale_access_gateway" "g" {
 				// The mint class's proof: the gateway reaches active —
 				// the platform minted the join key from the token and
 				// the node joined the tailnet.
+				accGatewayActive(t),
+			),
+		}},
+	})
+}
+
+// TestAccAccessGatewayPair is the #836 lane-B pair class: the gateway
+// enables with the OAuth client pair alone — ts_client_id +
+// ts_client_secret, no auth key or console token anywhere — and the
+// platform exchanges the pair for a tailnet-scoped token, then mints
+// the join key from it. The client must carry the platform scopes
+// (auth_keys, dns, devices:routes write, devices:core:read) and the
+// fluxvale-gateway tag (the minted key's tag; an unowned tag fails
+// the join, not the mint). The same standing-charge caveats as the
+// other gateway classes apply — the row persists (no API delete
+// route) and bills monthly — and later runs adopt the existing
+// gateway through the create's conflict path, so the nightly stays
+// idempotent.
+func TestAccAccessGatewayPair(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set — the acceptance lane runs nightly/tags/dispatch, never per-PR (wallet cost)")
+	}
+	accSkip(t, "gateway pair",
+		"TF_ACC_TAILNET_DOMAIN", "TF_ACC_TAILSCALE_CLIENT_ID", "TF_ACC_TAILSCALE_CLIENT_SECRET")
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: accProtoV6(),
+		PreCheck:                 func() { accPreCheck(t) },
+		// CheckDestroy is deliberately nil, as in the other gateway
+		// classes: destroy removes the resource from state only — there
+		// is no API delete route to assert against.
+		Steps: []resource.TestStep{{
+			Config: accVarDecls + `
+variable "tailnet_domain" {
+  type = string
+}
+
+variable "tailscale_client_id" {
+  type = string
+}
+
+variable "tailscale_client_secret" {
+  type      = string
+  sensitive = true
+}
+
+resource "fluxvale_access_gateway" "g" {
+  tailnet_domain   = var.tailnet_domain
+  ts_client_id     = var.tailscale_client_id
+  ts_client_secret = var.tailscale_client_secret
+}
+`,
+			ConfigVariables: config.Variables{
+				"api_url":                 accVars(t)["api_url"],
+				"token":                   accVars(t)["token"],
+				"tailnet_domain":          config.StringVariable(os.Getenv("TF_ACC_TAILNET_DOMAIN")),
+				"tailscale_client_id":     config.StringVariable(os.Getenv("TF_ACC_TAILSCALE_CLIENT_ID")),
+				"tailscale_client_secret": config.StringVariable(os.Getenv("TF_ACC_TAILSCALE_CLIENT_SECRET")),
+			},
+			Check: resource.ComposeTestCheckFunc(
+				resource.TestCheckResourceAttrWith("fluxvale_access_gateway.g", "hostname", func(v string) error {
+					if len(v) < 3 || v[:3] != "fv-" {
+						return fmt.Errorf("hostname = %q, want the fv- prefix", v)
+					}
+					return nil
+				}),
+				resource.TestCheckResourceAttrSet("fluxvale_access_gateway.g", "id"),
+				resource.TestCheckResourceAttrSet("fluxvale_access_gateway.g", "organization_id"),
+				// The pair class's proof: the gateway reaches active —
+				// the platform exchanged the pair and minted the join
+				// key, and the node joined the tailnet.
 				accGatewayActive(t),
 			),
 		}},

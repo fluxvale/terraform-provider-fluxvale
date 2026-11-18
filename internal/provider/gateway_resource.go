@@ -50,22 +50,25 @@ func (r *gatewayResource) Metadata(_ context.Context, req resource.MetadataReque
 // is config-authoritative — the wire has no attachment list, so reads
 // keep the configured set verbatim.
 type gatewayModel struct {
-	Organization   types.String `tfsdk:"organization"`
-	TailnetDomain  types.String `tfsdk:"tailnet_domain"`
-	AuthKey        types.String `tfsdk:"auth_key"`
-	APIToken       types.String `tfsdk:"api_token"`
-	RotateAPIToken types.String `tfsdk:"rotate_api_token_on"`
-	Instances      types.Set    `tfsdk:"instances"`
-	ID             types.String `tfsdk:"id"`
-	OrganizationID types.String `tfsdk:"organization_id"`
-	Hostname       types.String `tfsdk:"hostname"`
-	AccessProvider types.String `tfsdk:"access_provider"`
-	State          types.String `tfsdk:"state"`
-	StatusMessage  types.String `tfsdk:"status_message"`
-	MonthlyCents   types.Int64  `tfsdk:"monthly_cents"`
-	ProvisionedAt  types.String `tfsdk:"provisioned_at"`
-	TokenSetAt     types.String `tfsdk:"token_set_at"`
-	ClaimedDomains types.List   `tfsdk:"claimed_domains"`
+	Organization         types.String `tfsdk:"organization"`
+	TailnetDomain        types.String `tfsdk:"tailnet_domain"`
+	AuthKey              types.String `tfsdk:"auth_key"`
+	APIToken             types.String `tfsdk:"api_token"`
+	RotateAPIToken       types.String `tfsdk:"rotate_api_token_on"`
+	TSClientID           types.String `tfsdk:"ts_client_id"`
+	TSClientSecret       types.String `tfsdk:"ts_client_secret"`
+	RotateTSClientSecret types.String `tfsdk:"rotate_ts_client_secret_on"`
+	Instances            types.Set    `tfsdk:"instances"`
+	ID                   types.String `tfsdk:"id"`
+	OrganizationID       types.String `tfsdk:"organization_id"`
+	Hostname             types.String `tfsdk:"hostname"`
+	AccessProvider       types.String `tfsdk:"access_provider"`
+	State                types.String `tfsdk:"state"`
+	StatusMessage        types.String `tfsdk:"status_message"`
+	MonthlyCents         types.Int64  `tfsdk:"monthly_cents"`
+	ProvisionedAt        types.String `tfsdk:"provisioned_at"`
+	TokenSetAt           types.String `tfsdk:"token_set_at"`
+	ClaimedDomains       types.List   `tfsdk:"claimed_domains"`
 }
 
 func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
@@ -93,13 +96,16 @@ func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			// Optional rather than the framework's WriteOnly: auth_key
 			// keeps its value in state (the panel's re-paste is the
 			// only rotation), the same wire-write-only contract as
-			// env_vars and secret_access_key. api_token is different:
-			// it is true WriteOnly because it must never enter state.
+			// env_vars and secret_access_key. api_token and
+			// ts_client_secret are different: they are true WriteOnly
+			// because they must never enter state.
 			"auth_key": schema.StringAttribute{
 				Optional:  true,
 				Sensitive: true,
 				MarkdownDescription: "The Tailscale auth key the gateway joins your tailnet with. The legacy path — " +
-					"optional since the platform can mint the join key from `api_token`; set one of the two. Write-only: " +
+					"optional since the platform can mint the join key from a stored credential; the OAuth client pair " +
+					"(`ts_client_id` + `ts_client_secret`) is the preferred shape, `api_token` the console-token " +
+					"alternate. Set exactly one of the three shapes. Write-only: " +
 					"the API never echoes it, so an import leaves it null and the provider manages attachments only. " +
 					"The configured value is kept verbatim in state. Rotation has no API route (the panel's re-paste is " +
 					"the path), so changing it plans a replacement, and replacements are rejected.",
@@ -110,8 +116,9 @@ func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Sensitive: true,
 				WriteOnly: true,
 				MarkdownDescription: "The Tailscale API access token the platform uses to claim verified custom domains " +
-					"on your tailnet — and, with no auth_key, to mint the gateway's join key. Mint it from a tailnet " +
-					"owner/admin account — the token carries that account's permissions " +
+					"on your tailnet — and, with no auth_key, to mint the gateway's join key. The ALTERNATE credential: " +
+					"the OAuth client pair (`ts_client_id` + `ts_client_secret`) is the preferred shape. Mint the token " +
+					"from a tailnet owner/admin account — the token carries that account's permissions " +
 					"(console API tokens are fully permitted; scopes belong to trust credentials, not " +
 					"Keys-page tokens); keys expire within 90 days. **Write-only:** Terraform never writes " +
 					"the value to state or plan, and the API never echoes it. On create with no auth_key the platform " +
@@ -129,6 +136,47 @@ func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"never re-sends, even though Terraform cannot see the write-only value. Set `api_token` whenever this " +
 					"changes. Null is valid: the gateway simply has no declarative token (an imported row manages " +
 					"attachments without one).",
+			},
+			// The OAuth client pair (#836 lane B) — the PREFERRED
+			// credential. The id is plain (public identity, kept in
+			// state for drift clarity); the secret is the api_token
+			// posture exactly (sensitive, true WriteOnly, unknown
+			// refused at apply). The pair rides the create POST as the
+			// third credential arm, and the rotation trigger re-sends
+			// it in place through the credential PATCH — no plan
+			// modifiers anywhere: pair rotation is NOT a replacement
+			// (a replacement cannot succeed, and the PATCH exists).
+			"ts_client_id": schema.StringAttribute{
+				Optional: true,
+				MarkdownDescription: "Your Tailscale OAuth client's id (admin console → Settings → OAuth clients) — the " +
+					"public half of the OAuth trust credential, the gateway enrollment's preferred credential. Create the " +
+					"client with the scopes the platform needs (`auth_keys`, `dns`, `devices:routes` write, " +
+					"`devices:core:read`) and the `fluxvale-gateway` tag — the platform's minted join keys carry that tag, " +
+					"so the client's tags must include it or the mint fails. Not a secret: it is kept verbatim in state " +
+					"for drift clarity, and the API never treats it as one. Set it together with `ts_client_secret` and " +
+					"no `api_token`/`auth_key` — exactly one credential shape is accepted, and the platform refuses mixes " +
+					"with a field-scoped 400 that surfaces verbatim. Moving to a new OAuth client: set the new id and " +
+					"secret and bump `rotate_ts_client_secret_on` — the pair re-stores in place, no replacement.",
+			},
+			"ts_client_secret": schema.StringAttribute{
+				Optional:  true,
+				Sensitive: true,
+				WriteOnly: true,
+				MarkdownDescription: "Your Tailscale OAuth client's secret — the crown half of the preferred credential pair, " +
+					"shown once when the client is created. The platform exchanges the pair for a short-lived, tailnet-scoped " +
+					"token (the secret is never a direct Bearer) and mints the gateway's join key from it. **Write-only:** " +
+					"Terraform never writes the value to state or plan, and the API never echoes it. Because a write-only " +
+					"value cannot produce a plan diff, bump `rotate_ts_client_secret_on` to re-send it. Requires " +
+					"Terraform 1.12+ or OpenTofu 1.13+ and a provider release containing this attribute; older CLIs leave " +
+					"it out and paste the pair in the panel instead.",
+			},
+			"rotate_ts_client_secret_on": schema.StringAttribute{
+				Optional: true,
+				MarkdownDescription: "Rotation trigger for the OAuth client pair — an arbitrary string (a date, a version, " +
+					"a nonce). Changing it re-sends `ts_client_id` and the current `ts_client_secret` in place through the " +
+					"credential PATCH; an unchanged value never re-sends, even though Terraform cannot see the write-only " +
+					"secret. Set `ts_client_secret` whenever this changes. Null is valid: the gateway simply has no " +
+					"declarative pair (an imported row manages attachments without one).",
 			},
 			"instances": schema.SetAttribute{
 				ElementType: types.StringType,
@@ -178,8 +226,9 @@ func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			},
 			"token_set_at": schema.StringAttribute{
 				Computed: true,
-				Description: "When the Tailscale API token was last saved (null before the first save). The token value is " +
-					"never readable; watch this stamp and rotate before the key's 90-day expiry.",
+				Description: "When the Tailscale credential (the console token or the OAuth client pair) was last saved " +
+					"(null before the first save). The credential values are never readable; watch this stamp and rotate " +
+					"before the key's 90-day expiry.",
 			},
 			"claimed_domains": schema.ListAttribute{
 				ElementType: types.StringType,
@@ -249,6 +298,18 @@ func (r *gatewayResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 	if !plan.AuthKey.IsUnknown() && !plan.AuthKey.Equal(state.AuthKey) {
 		changed = append(changed, "auth_key")
 	}
+	// The write-only client secret cannot produce a plan diff — the
+	// framework nulls it in every real plan and state (the api_token
+	// stance), and its rotation signal is rotate_ts_client_secret_on,
+	// an in-place update. The comparison is therefore a no-op on real
+	// plans; it pins the policy for any plan that ever does carry the
+	// secret (a crafted state, a core semantics shift): a credential
+	// presence change must not slide through silently — the same
+	// refusal auth_key gets, for the same reason (the replacement
+	// cannot succeed, and the trigger is the supported rotation).
+	if !plan.TSClientSecret.IsUnknown() && !plan.TSClientSecret.Equal(state.TSClientSecret) {
+		changed = append(changed, "ts_client_secret")
+	}
 	if len(changed) == 0 {
 		return
 	}
@@ -270,14 +331,16 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	// The API token is write-only: it lives in the configuration, not
-	// the planned state (Terraform nulls it there). Read it from Config
-	// for this apply only, and keep it in a local so the state writes
-	// below never carry it. A write-only value must be known by apply
-	// time — skipping an unknown silently would leave the gateway
-	// without a token and no diff to retry.
-	var apiToken string
+	// The API token and the OAuth client secret are write-only: they
+	// live in the configuration, not the planned state (Terraform
+	// nulls them there). Read them from Config for this apply only,
+	// and keep them in locals so the state writes below never carry
+	// them. A write-only value must be known by apply time — skipping
+	// an unknown silently would leave the gateway without its
+	// credential and no diff to retry.
+	var apiToken, tsClientSecret string
 	rotateTrigger := data.RotateAPIToken
+	pairRotateTrigger := data.RotateTSClientSecret
 	if req.Config.Schema != nil {
 		var config gatewayModel
 		resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
@@ -292,18 +355,37 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 			)
 			return
 		}
+		if config.TSClientSecret.IsUnknown() {
+			resp.Diagnostics.AddError(
+				"ts_client_secret must be known at apply time",
+				"The write-only client secret cannot be deferred to apply — use a known value (an ephemeral variable "+
+					"resolves before apply) and apply again.",
+			)
+			return
+		}
 		if !config.APIToken.IsNull() {
 			apiToken = config.APIToken.ValueString()
 		}
+		if !config.TSClientSecret.IsNull() {
+			tsClientSecret = config.TSClientSecret.ValueString()
+		}
 		if !config.RotateAPIToken.IsUnknown() {
 			rotateTrigger = config.RotateAPIToken
+		}
+		if !config.RotateTSClientSecret.IsUnknown() {
+			pairRotateTrigger = config.RotateTSClientSecret
 		}
 	}
 	if rotateTrigger.IsUnknown() {
 		rotateTrigger = types.StringNull()
 	}
+	if pairRotateTrigger.IsUnknown() {
+		pairRotateTrigger = types.StringNull()
+	}
 	data.APIToken = types.StringNull()
 	data.RotateAPIToken = rotateTrigger
+	data.TSClientSecret = types.StringNull()
+	data.RotateTSClientSecret = pairRotateTrigger
 
 	pd := r.data(&resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
@@ -311,24 +393,34 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	// Enabling a gateway needs exactly one enrollment credential, and
-	// the wire takes it only at create — neither auth_key nor api_token
-	// is ever echoed, so there is no later save to supply either (an
-	// import with no credential manages attachments only — that is the
-	// documented shape, not an error). The platform #836 contract:
-	// auth_key (the legacy two-paste path) OR api_token, whose join key
-	// the platform mints at create.
+	// the wire takes it only at create — none of the three shapes is
+	// ever echoed, so there is no later save to supply one (an import
+	// with no credential manages attachments only — that is the
+	// documented shape, not an error). The #836 contract, three ways:
+	// the OAuth client pair (ts_client_id + ts_client_secret — the
+	// preferred shape), api_token (the platform mints the join key
+	// from it), or auth_key (the legacy two-paste path). None set is
+	// refused client-side with all three named; any MIX rides the POST
+	// and the API's field-scoped 400 surfaces verbatim (refusing
+	// ambiguity is the platform's job — the sentences are pinned).
 	authKeySent := !data.AuthKey.IsNull() && !data.AuthKey.IsUnknown()
-	if !authKeySent && apiToken == "" {
+	pairIDSent := !data.TSClientID.IsNull() && !data.TSClientID.IsUnknown()
+	if !authKeySent && apiToken == "" && !pairIDSent && tsClientSecret == "" {
 		resp.Diagnostics.AddError(
-			"auth_key or api_token is required to enable a gateway",
-			"The gateway joins your tailnet with an auth key, and the API accepts it only at create. "+
-				"Set api_token (the platform mints the join key from it — minted from a tailnet owner/admin account) "+
-				"or auth_key (the legacy two-paste path) — or import the existing gateway instead of creating one.",
+			"ts_client_id and ts_client_secret, api_token, or auth_key is required to enable a gateway",
+			"Enabling the gateway takes exactly one enrollment credential, and the API accepts it only at create. "+
+				"Set the OAuth client pair — ts_client_id and ts_client_secret, the preferred shape (the platform "+
+				"exchanges it and mints the join key) — or api_token (the platform mints the join key from it — "+
+				"minted from a tailnet owner/admin account), or auth_key (the legacy two-paste path) — or import "+
+				"the existing gateway instead of creating one.",
 		)
 		return
 	}
-	// The mint path: the token rides the POST and the platform stores
-	// it at create — no separate token save follows.
+	// The mint path: the token or the pair rides the POST and the
+	// platform stores the credential at create — no separate token
+	// save follows. (A pair beside auth_key is a mixed shape the POST
+	// itself 400s, so the legacy after-active save below only ever
+	// runs for the auth_key + api_token combination.)
 	mint := !authKeySent
 
 	orgID := resolveOrgID(ctx, pd.client, data.Organization, pd.organization, &resp.Diagnostics)
@@ -341,12 +433,26 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 		OrganizationID: orgID,
 		TailnetDomain:  data.TailnetDomain.ValueString(),
 		AuthKey:        data.AuthKey.ValueString(),
+		TsClientID:     data.TSClientID.ValueString(),
+		TsClientSecret: tsClientSecret,
 	}
 	if mint {
 		createInput.ApiToken = apiToken
 	}
 	gw, err := pd.client.CreateGateway(ctx, createInput)
 	if err != nil {
+		// A field-scoped 400 (a mixed or lone-half credential shape) is
+		// the config's own refusal: surface it verbatim and stop. The
+		// adoption probe below exists for the singleton-conflict 409 —
+		// letting it run on a 400 would swallow the honest sentence and
+		// emit a "credential was stored" adoption warning over a create
+		// that was REFUSED (#19 review: nothing was minted or stored).
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest {
+			resp.Diagnostics.AddError("Unable to create the access gateway", err.Error())
+			return
+		}
+
 		// The likeliest refusal is the org's unique-organization
 		// identity — the singleton may already exist. Probe before
 		// failing: a matching row is adopted, a diverging one is named.
@@ -363,13 +469,17 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 	// set conversion, wait timeout, attach refusal — leaves a tracked
 	// resource the next apply updates or forgets. mapGateway fills
 	// every computed field, so no unknowns remain to clear. A
-	// create-time token keeps the trigger out of this write on both
-	// credential paths (the mint path restores it right below — its
-	// save already happened in the POST): if a save were still to fail,
-	// the next apply must see a trigger change and retry.
+	// create-time credential keeps its trigger out of this write on
+	// every minted path (the mint restores it right below — its save
+	// already happened in the POST): if a save were still to fail, the
+	// next apply must see a trigger change and retry.
 	tokenPending := apiToken != ""
+	pairPending := tsClientSecret != ""
 	if tokenPending {
 		data.RotateAPIToken = types.StringNull()
+	}
+	if pairPending {
+		data.RotateTSClientSecret = types.StringNull()
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
@@ -380,10 +490,12 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 	// create, after the gateway serves. Waiting for `active` here means
 	// the claim sweep has a node to talk to; a gateway created before
 	// any domain exists is fine — a later verification or attach sweeps.
-	// On the mint path the token already rode the POST — the platform
-	// stored it at create and its observer claims the verified domains
-	// once the node is up — so the after-active save is skipped
-	// entirely.
+	// On the mint paths (the token or the client pair alone) the
+	// credential already rode the POST — the platform stored it at
+	// create and its observer claims the verified domains once the node
+	// is up — so the after-active save is skipped entirely. A pair
+	// beside auth_key is a mixed shape the POST itself refuses, so this
+	// legacy save only ever runs for auth_key + api_token.
 	if tokenPending && !mint {
 		waitGatewayActive(ctx, pd, orgID, &resp.Diagnostics)
 		if resp.Diagnostics.HasError() {
@@ -400,8 +512,9 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 		}
 		mapGateway(&data, gw)
 	}
-	if tokenPending {
+	if tokenPending || pairPending {
 		data.RotateAPIToken = rotateTrigger
+		data.RotateTSClientSecret = pairRotateTrigger
 		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 		if resp.Diagnostics.HasError() {
 			return
@@ -440,12 +553,13 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 // adoptExistingGateway recovers a POST the org's singleton refused.
 // A row whose create-only fields match the config IS the gateway this
 // create asked for — adopt it with a warning. On the legacy path the
-// warning disclaims the write-only auth_key; on the mint path the
-// platform holds the enrollment credential (minted from the create-time
-// api_token), so there is no auth_key to disclaim. A diverging row is
-// named, with the only real remediation. Returns false when the caller
-// must stop (a diagnostic is already set — either the original POST
-// error when no row exists, or the divergence).
+// warning disclaims the write-only auth_key; on the mint paths (the
+// OAuth client pair or the api_token — whichever rode the POST) the
+// platform holds the enrollment credential, so there is no auth_key
+// to disclaim. A diverging row is named, with the only real
+// remediation. Returns false when the caller must stop (a diagnostic
+// is already set — either the original POST error when no row exists,
+// or the divergence).
 func adoptExistingGateway(ctx context.Context, pd *providerData, orgID string, data *gatewayModel, createErr error, diags *diag.Diagnostics) bool {
 	gw, err := pd.client.GetOrgGateway(ctx, orgID)
 	if err != nil {
@@ -468,7 +582,7 @@ func adoptExistingGateway(ctx context.Context, pd *providerData, orgID string, d
 			"Adopted the organization's existing gateway",
 			fmt.Sprintf("The create was refused but gateway %s (%s) already serves tailnet %q as the config asks — "+
 				"Terraform now manages it. The platform holds the enrollment credential (the join key was minted from "+
-				"the create-time api_token); the panel's token paste covers rotation.",
+				"the create-time credential — the OAuth client pair or api_token); the panel's paste covers rotation.",
 				gw.ID, gw.Hostname, gw.TailnetDomain),
 		)
 	} else {
@@ -655,9 +769,10 @@ func (r *gatewayResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	// Write-only token: read it from the configuration, never the
-	// plan/state. It is sent only when the rotation trigger changed.
-	var apiToken string
+	// Write-only values: read them from the configuration, never the
+	// plan/state. The token is sent only when the rotation trigger
+	// changed; the client pair likewise through its own trigger.
+	var apiToken, tsClientSecret string
 	if req.Config.Schema != nil {
 		var config gatewayModel
 		resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
@@ -672,11 +787,23 @@ func (r *gatewayResource) Update(ctx context.Context, req resource.UpdateRequest
 			)
 			return
 		}
+		if config.TSClientSecret.IsUnknown() {
+			resp.Diagnostics.AddError(
+				"ts_client_secret must be known at apply time",
+				"The write-only client secret cannot be deferred to apply — use a known value (an ephemeral variable "+
+					"resolves before apply) and apply again.",
+			)
+			return
+		}
 		if !config.APIToken.IsNull() {
 			apiToken = config.APIToken.ValueString()
 		}
+		if !config.TSClientSecret.IsNull() {
+			tsClientSecret = config.TSClientSecret.ValueString()
+		}
 	}
 	plan.APIToken = types.StringNull()
+	plan.TSClientSecret = types.StringNull()
 
 	pd := r.data(&resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
@@ -700,12 +827,15 @@ func (r *gatewayResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	// The rotation trigger is the only visible signal for a write-only
-	// value: an unchanged trigger never re-sends, even though the token
-	// is present in the config on every apply. Removing the trigger is
-	// not a rotation — it just drops the declarative claim. A changed,
-	// non-null trigger without a token cannot send anything — refuse
-	// before the PATCH.
+	// The rotation triggers are the only visible signal for the
+	// write-only values: an unchanged trigger never re-sends, even
+	// though the value is present in the config on every apply.
+	// Removing a trigger is not a rotation — it just drops the
+	// declarative claim. A changed, non-null trigger without its value
+	// cannot send anything — refuse before the PATCH. The pair's PATCH
+	// carries both halves (one shape per save), so the client id rides
+	// from the plan, falling back to the state's when the config
+	// leaves it off — the current pair is what "re-send" means.
 	if plan.RotateAPIToken.IsUnknown() {
 		plan.RotateAPIToken = state.RotateAPIToken
 	}
@@ -723,6 +853,33 @@ func (r *gatewayResource) Update(ctx context.Context, req resource.UpdateRequest
 		if err != nil {
 			resp.Diagnostics.AddError(
 				"Unable to save the Tailscale API token",
+				fmt.Sprintf("gateway %s: %v", plan.ID.ValueString(), err),
+			)
+			return
+		}
+		mapGateway(&plan, gw)
+	}
+	if plan.RotateTSClientSecret.IsUnknown() {
+		plan.RotateTSClientSecret = state.RotateTSClientSecret
+	}
+	if !plan.RotateTSClientSecret.IsNull() && !plan.RotateTSClientSecret.Equal(state.RotateTSClientSecret) {
+		if tsClientSecret == "" {
+			resp.Diagnostics.AddError(
+				"ts_client_secret is required to rotate the Tailscale client pair",
+				"rotate_ts_client_secret_on changed, but ts_client_secret is null. Set ts_client_secret from an "+
+					"ephemeral variable (or revert the trigger); a write-only value cannot be read back from state.",
+			)
+			return
+		}
+
+		pairID := plan.TSClientID
+		if pairID.IsNull() || pairID.IsUnknown() {
+			pairID = state.TSClientID
+		}
+		gw, err := pd.client.SetGatewayClientPair(ctx, orgID, plan.ID.ValueString(), pairID.ValueString(), tsClientSecret)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Unable to save the Tailscale client pair",
 				fmt.Sprintf("gateway %s: %v", plan.ID.ValueString(), err),
 			)
 			return
@@ -782,9 +939,9 @@ func (r *gatewayResource) ImportState(ctx context.Context, req resource.ImportSt
 	// terraform import fluxvale_access_gateway.x <org_id_or_slug>.
 	// Read fills the wire-mirrored fields and seeds organization from
 	// the resolution, so a config that leaves it unset converges.
-	// auth_key and instances stay null — keep your config matching what
-	// you deployed; a mismatch plans a replacement, and replacements
-	// are rejected at plan time.
+	// auth_key, the pair, and instances stay null — keep your config
+	// matching what you deployed; a mismatch plans a replacement, and
+	// replacements are rejected at plan time.
 	resource.ImportStatePassthroughID(ctx, path.Root("organization"), req, resp)
 }
 
