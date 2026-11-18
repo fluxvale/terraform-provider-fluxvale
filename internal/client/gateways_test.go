@@ -102,6 +102,44 @@ func TestCreateGatewayOmitsUnsetOrg(t *testing.T) {
 	}
 }
 
+// The #836 mint body: a set ApiToken rides the attributes (the platform
+// mints the join key from it), an empty one is omitted entirely — the
+// same omission style as organization_id.
+func TestCreateGatewayApiTokenOmissionStyle(t *testing.T) {
+	var gotBody map[string]any
+	srv := handlerServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, gatewayCreateDocument())
+	}))
+
+	c := New(srv.URL, "fvpat_test", "test", srv.Client())
+
+	if _, err := c.CreateGateway(context.Background(), CreateGatewayInput{
+		TailnetDomain: "example.ts.net",
+		ApiToken:      "tskey-api-MINT-secret",
+	}); err != nil {
+		t.Fatalf("CreateGateway (mint): %v", err)
+	}
+	attrs := gotBody["data"].(map[string]any)["attributes"].(map[string]any)
+	if attrs["api_token"] != "tskey-api-MINT-secret" {
+		t.Errorf("api_token = %v, want the mint token on the wire", attrs["api_token"])
+	}
+
+	if _, err := c.CreateGateway(context.Background(), CreateGatewayInput{
+		TailnetDomain: "example.ts.net",
+		AuthKey:       "tskey-test",
+	}); err != nil {
+		t.Fatalf("CreateGateway (legacy): %v", err)
+	}
+	attrs = gotBody["data"].(map[string]any)["attributes"].(map[string]any)
+	if _, ok := attrs["api_token"]; ok {
+		t.Error("api_token sent while empty — the omission style must match organization_id")
+	}
+}
+
 func TestGetOrgGateway404IsTyped(t *testing.T) {
 	srv := testServer(t, http.StatusNotFound, `{"errors": [{"status": "404"}]}`)
 	c := New(srv.URL, "fvpat_test", "test", srv.Client())

@@ -13,7 +13,6 @@ The API's gateway surface is create, the singleton read, the attach/detach verbs
 ```hcl
 resource "fluxvale_access_gateway" "org" {
   tailnet_domain = var.tailnet_domain
-  auth_key       = var.tailscale_auth_key
   instances      = [fluxvale_instance.memos.id]
 
   api_token           = var.tailscale_api_token
@@ -21,11 +20,15 @@ resource "fluxvale_access_gateway" "org" {
 }
 ```
 
+## Enabling the gateway
+
+A fresh create enables the gateway with exactly one enrollment credential — `api_token` or `auth_key`, never both (the API refuses any other combination with a 400 whose sentence surfaces verbatim). With `api_token` the platform mints the join key from your token, so there is nothing to paste in the Tailscale admin console. The token needs the `auth_keys` scope (alongside `dns`, `devices:routes`, and `devices:core:read`); the minted key is single-use, tagged, expires after an hour, and is revoked automatically on use. Your tailnet's ACL must own the gateway tag (`tag:fluxvale-gateway` in your tagOwners) or the node cannot join. `auth_key` is the legacy fallback: mint a join key in the Tailscale admin console and paste it here.
+
 ## Argument Reference
 
 - `tailnet_domain` (Required) — the tailnet the gateway joins.
-- `auth_key` (Optional, Sensitive) — the join credential, required only when this resource ENABLES a gateway (the wire never echoes it, so imports manage attachments with it null).
-- `api_token` (Optional, Sensitive, Write-only) — the Tailscale API access token the platform uses to claim verified custom domains. Mint it from a tailnet owner/admin account that can manage DNS and device routes (the `dns`, `devices:routes`, and `devices:core:read` permissions); `auth_keys` is not required, and keys expire within 90 days. It never enters state or plan and the API never echoes it. On create it is sent once, after the gateway reaches `active`; the save attempts to claim every verified domain — read `claimed_domains` for the result. Requires Terraform 1.12+ or OpenTofu 1.13+ and a provider release containing this attribute; older CLIs leave it out and paste the token in the panel.
+- `auth_key` (Optional, Sensitive) — the legacy join credential. Optional since the platform can mint the join key from `api_token`; set one of the two when this resource ENABLES a gateway (the wire never echoes it, so imports manage attachments with it null).
+- `api_token` (Optional, Sensitive, Write-only) — the Tailscale API access token the platform uses to claim verified custom domains — and, with no `auth_key`, to mint the gateway's join key. Mint it from a tailnet owner/admin account with the `dns`, `devices:routes`, `devices:core:read`, and `auth_keys` permissions (the mint needs `auth_keys`); keys expire within 90 days. It never enters state or plan and the API never echoes it. On create with no `auth_key` the platform mints a single-use, tagged, 1-hour join key from this token; revocation is automatic on use. Otherwise it is sent once after the gateway reaches `active`, and the save attempts to claim every verified domain — read `claimed_domains` for the result. Requires Terraform 1.12+ or OpenTofu 1.13+ and a provider release containing this attribute; older CLIs leave it out and paste the token in the panel.
 - `rotate_api_token_on` (Optional) — the token's rotation trigger, an arbitrary string (a date, a version, a nonce). Changing it re-sends the current `api_token` in place; an unchanged value never re-sends, because a write-only value cannot produce a plan diff. Set `api_token` whenever this changes.
 - `organization` (Optional) — id or slug; falls back to the provider-level `organization`, then to your sole org. The singleton is resolved per org.
 - `instances` (Optional, set of instance ids) — converges via the attach/detach verbs, one call per added/removed id. Attaching waits the gateway to `active` (create lands `provisioning`; the observer promotes within about a minute). The set is config-authoritative: the API has no attachment list, so out-of-band panel attach/detach is invisible to the provider.

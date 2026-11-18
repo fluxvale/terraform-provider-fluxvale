@@ -109,6 +109,15 @@ type recordedRequest struct {
 	body               map[string]any
 }
 
+// The #836 pinned refusal sentences (the platform's 400 bodies, field
+// auth_key or api_token). The fake serves them verbatim and the tests
+// assert them verbatim — no local mapping in the provider.
+const (
+	gatewayRefusalNeitherCredential = "Paste an auth key or an API token to enable private access"
+	gatewayRefusalBothCredentials   = "Paste one or the other, not both"
+	gatewayRefusalMissingScope      = "Your Tailscale API key can't create join keys — add the `auth_keys` scope when you mint it, or paste an auth key instead"
+)
+
 type scriptedResponse struct {
 	status int
 	body   string
@@ -356,6 +365,26 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.record(r, body)
+		// The #836 one-credential contract, enforced the way the
+		// platform enforces it: the create takes auth_key (the legacy
+		// path) or api_token (the mint) — exactly one. The pinned
+		// sentences ride `detail` so they surface verbatim through the
+		// client's *APIError (the provider maps none of them locally).
+		attrs, _ := body["data"].(map[string]any)["attributes"].(map[string]any)
+		authKey, _ := attrs["auth_key"].(string)
+		apiToken, _ := attrs["api_token"].(string)
+		switch {
+		case authKey == "" && apiToken == "":
+			f.json(w, http.StatusBadRequest, `{"errors": [{"code": "invalid_argument",
+				"detail": "`+gatewayRefusalNeitherCredential+`",
+				"source": {"pointer": "/data/attributes/auth_key"}}]}`)
+			return
+		case authKey != "" && apiToken != "":
+			f.json(w, http.StatusBadRequest, `{"errors": [{"code": "invalid_argument",
+				"detail": "`+gatewayRefusalBothCredentials+`",
+				"source": {"pointer": "/data/attributes/api_token"}}]}`)
+			return
+		}
 		f.json(w, f.gatewayPostStatus, f.gatewayPostDoc)
 	})
 	// The pairing verbs render flat/generic shapes — the 201 attach body
