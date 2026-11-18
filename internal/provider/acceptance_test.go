@@ -35,9 +35,13 @@ import (
 //	                          optional R2 target — the backups test skips without
 //	                          the full set (the org must have paid once for backups)
 //	TF_ACC_TAILNET_DOMAIN + TF_ACC_TAILSCALE_AUTH_KEY
-//	                          optional — the gateway test skips without the pair
-//	                          (the gateway persists after destroy — no API delete
-//	                          route — and bills monthly)
+//	                          optional — the legacy (auth_key) gateway class skips
+//	                          without the pair (the gateway persists after destroy
+//	                          — no API delete route — and bills monthly)
+//	TF_ACC_TAILNET_DOMAIN + TF_ACC_TAILSCALE_API_TOKEN
+//	                          optional — the #836 mint gateway class skips without
+//	                          the pair (same standing charge; the Tailscale token
+//	                          needs the auth_keys scope)
 //	TF_ACC_DOMAIN             optional — the custom-domain test skips without it
 //	TF_ACC_POCKET_ID_INSTANCE_ID
 //	                          optional — the PocketID SSO test skips without it; it
@@ -585,6 +589,103 @@ resource "fluxvale_access_gateway" "g" {
 			),
 		}},
 	})
+}
+
+// TestAccAccessGatewayMint is the #836 mint class: the gateway enables
+// with api_token alone — no auth key anywhere — and the platform mints
+// the join key from it (the token needs the auth_keys scope; the
+// tailnet's ACL must own tag:fluxvale-gateway). The same standing-
+// charge caveats as the legacy class apply — the row persists (no API
+// delete route) and bills monthly — and later runs adopt the existing
+// gateway through the create's conflict path, so the nightly stays
+// idempotent.
+func TestAccAccessGatewayMint(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set — the acceptance lane runs nightly/tags/dispatch, never per-PR (wallet cost)")
+	}
+	accSkip(t, "gateway mint", "TF_ACC_TAILNET_DOMAIN", "TF_ACC_TAILSCALE_API_TOKEN")
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: accProtoV6(),
+		PreCheck:                 func() { accPreCheck(t) },
+		// CheckDestroy is deliberately nil, as in the legacy class:
+		// destroy removes the resource from state only — there is no
+		// API delete route to assert against.
+		Steps: []resource.TestStep{{
+			Config: accVarDecls + `
+variable "tailnet_domain" {
+  type = string
+}
+
+variable "tailscale_api_token" {
+  type      = string
+  sensitive = true
+}
+
+resource "fluxvale_access_gateway" "g" {
+  tailnet_domain = var.tailnet_domain
+  api_token      = var.tailscale_api_token
+}
+`,
+			ConfigVariables: config.Variables{
+				"api_url":             accVars(t)["api_url"],
+				"token":               accVars(t)["token"],
+				"tailnet_domain":      config.StringVariable(os.Getenv("TF_ACC_TAILNET_DOMAIN")),
+				"tailscale_api_token": config.StringVariable(os.Getenv("TF_ACC_TAILSCALE_API_TOKEN")),
+			},
+			Check: resource.ComposeTestCheckFunc(
+				resource.TestCheckResourceAttrWith("fluxvale_access_gateway.g", "hostname", func(v string) error {
+					if len(v) < 3 || v[:3] != "fv-" {
+						return fmt.Errorf("hostname = %q, want the fv- prefix", v)
+					}
+					return nil
+				}),
+				resource.TestCheckResourceAttrSet("fluxvale_access_gateway.g", "id"),
+				resource.TestCheckResourceAttrSet("fluxvale_access_gateway.g", "organization_id"),
+				// The mint class's proof: the gateway reaches active —
+				// the platform minted the join key from the token and
+				// the node joined the tailnet.
+				accGatewayActive(t),
+			),
+		}},
+	})
+}
+
+// accGatewayActive polls the singleton read until the gateway serves:
+// the create lands :provisioning and the observer (about a minute of
+// cadence) is the only promoter to :active.
+func accGatewayActive(t *testing.T) func(*terraform.State) error {
+	t.Helper()
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources["fluxvale_access_gateway.g"]
+		if !ok {
+			return fmt.Errorf("fluxvale_access_gateway.g is not in state")
+		}
+		c := accClient(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		for {
+			gw, err := c.GetOrgGateway(ctx, rs.Primary.Attributes["organization_id"])
+			if err != nil {
+				return fmt.Errorf("reading the gateway: %w", err)
+			}
+			switch gw.State {
+			case "active":
+				return nil
+			case "needs_attention", "suspended", "destroying":
+				msg := "no message"
+				if gw.StatusMessage != nil {
+					msg = *gw.StatusMessage
+				}
+				return fmt.Errorf("gateway landed in %s: %s", gw.State, msg)
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("gateway still %q after 10m", gw.State)
+			case <-time.After(15 * time.Second):
+			}
+		}
+	}
 }
 
 // TestAccCustomDomain registers the org's custom domain WITHOUT

@@ -98,11 +98,11 @@ func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"auth_key": schema.StringAttribute{
 				Optional:  true,
 				Sensitive: true,
-				MarkdownDescription: "The Tailscale auth key the gateway joins your tailnet with — required when this " +
-					"resource ENABLES a gateway (a fresh create). Write-only: the API never echoes it, so an import " +
-					"leaves it null and the provider manages attachments only. The configured value is kept verbatim in " +
-					"state. Rotation has no API route (the panel's re-paste is the path), so changing it plans a " +
-					"replacement, and replacements are rejected.",
+				MarkdownDescription: "The Tailscale auth key the gateway joins your tailnet with. The legacy path — " +
+					"optional since the platform can mint the join key from `api_token`; set one of the two. Write-only: " +
+					"the API never echoes it, so an import leaves it null and the provider manages attachments only. " +
+					"The configured value is kept verbatim in state. Rotation has no API route (the panel's re-paste is " +
+					"the path), so changing it plans a replacement, and replacements are rejected.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"api_token": schema.StringAttribute{
@@ -110,13 +110,16 @@ func (r *gatewayResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Sensitive: true,
 				WriteOnly: true,
 				MarkdownDescription: "The Tailscale API access token the platform uses to claim verified custom domains " +
-					"on your tailnet. Mint it from a tailnet owner/admin account with the `dns`, `devices:routes`, and " +
-					"`devices:core:read` scopes; keys expire within 90 days. **Write-only:** Terraform never writes the " +
-					"value to state or plan, and the API never echoes it. On create it is sent once, after the gateway " +
-					"reaches `active`, and the save claims every verified domain in the organization. Because a write-only " +
-					"value cannot produce a plan diff, bump `rotate_api_token_on` to send the current token again. Requires " +
-					"Terraform 1.12+ or OpenTofu 1.13+ and a provider release containing this attribute; " +
-					"older CLIs leave it out and paste the token in the panel instead.",
+					"on your tailnet — and, with no auth_key, to mint the gateway's join key. Mint it from a tailnet " +
+					"owner/admin account with the `dns`, `devices:routes`, `devices:core:read`, and `auth_keys` scopes " +
+					"(the mint needs `auth_keys`); keys expire within 90 days. **Write-only:** Terraform never writes " +
+					"the value to state or plan, and the API never echoes it. On create with no auth_key the platform " +
+					"mints a single-use, tagged, 1-hour join key from this token; revocation is automatic on use. " +
+					"Otherwise it is sent once, after the gateway reaches `active`, and the save claims every verified " +
+					"domain in the organization. Because a write-only value cannot produce a plan diff, bump " +
+					"`rotate_api_token_on` to send the current token again. Requires Terraform 1.12+ or OpenTofu 1.13+ " +
+					"and a provider release containing this attribute; older CLIs leave it out and paste the token in " +
+					"the panel instead.",
 			},
 			"rotate_api_token_on": schema.StringAttribute{
 				Optional: true,
@@ -306,18 +309,26 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	// Enabling a gateway needs the key: the wire takes auth_key only at
-	// create and never echoes it, so there is no later save to supply
-	// it (an import with no auth_key manages attachments only — that is
-	// the documented shape, not an error).
-	if data.AuthKey.IsNull() || data.AuthKey.IsUnknown() {
+	// Enabling a gateway needs exactly one enrollment credential, and
+	// the wire takes it only at create — neither auth_key nor api_token
+	// is ever echoed, so there is no later save to supply either (an
+	// import with no credential manages attachments only — that is the
+	// documented shape, not an error). The platform #836 contract:
+	// auth_key (the legacy two-paste path) OR api_token, whose join key
+	// the platform mints at create.
+	authKeySent := !data.AuthKey.IsNull() && !data.AuthKey.IsUnknown()
+	if !authKeySent && apiToken == "" {
 		resp.Diagnostics.AddError(
-			"auth_key is required to enable a gateway",
-			"The gateway joins your tailnet with a Tailscale auth key, and the API accepts it only at create. "+
-				"Set auth_key in your config — or import the existing gateway instead of creating one.",
+			"auth_key or api_token is required to enable a gateway",
+			"The gateway joins your tailnet with an auth key, and the API accepts it only at create. "+
+				"Set api_token (the platform mints the join key from it — the token needs the auth_keys scope) "+
+				"or auth_key (the legacy two-paste path) — or import the existing gateway instead of creating one.",
 		)
 		return
 	}
+	// The mint path: the token rides the POST and the platform stores
+	// it at create — no separate token save follows.
+	mint := !authKeySent
 
 	orgID := resolveOrgID(ctx, pd.client, data.Organization, pd.organization, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
@@ -325,11 +336,15 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 	seedOrganization(&data, orgID)
 
-	gw, err := pd.client.CreateGateway(ctx, client.CreateGatewayInput{
+	createInput := client.CreateGatewayInput{
 		OrganizationID: orgID,
 		TailnetDomain:  data.TailnetDomain.ValueString(),
 		AuthKey:        data.AuthKey.ValueString(),
-	})
+	}
+	if mint {
+		createInput.ApiToken = apiToken
+	}
+	gw, err := pd.client.CreateGateway(ctx, createInput)
 	if err != nil {
 		// The likeliest refusal is the org's unique-organization
 		// identity — the singleton may already exist. Probe before
@@ -346,9 +361,11 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 	// post-POST stance): write what we know so every later failure —
 	// set conversion, wait timeout, attach refusal — leaves a tracked
 	// resource the next apply updates or forgets. mapGateway fills
-	// every computed field, so no unknowns remain to clear. A pending
-	// token save keeps the trigger out of this write: if the save
-	// fails, the next apply must still see a trigger change and retry.
+	// every computed field, so no unknowns remain to clear. A
+	// create-time token keeps the trigger out of this write on both
+	// credential paths (the mint path restores it right below — its
+	// save already happened in the POST): if a save were still to fail,
+	// the next apply must see a trigger change and retry.
 	tokenPending := apiToken != ""
 	if tokenPending {
 		data.RotateAPIToken = types.StringNull()
@@ -362,7 +379,11 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 	// create, after the gateway serves. Waiting for `active` here means
 	// the claim sweep has a node to talk to; a gateway created before
 	// any domain exists is fine — a later verification or attach sweeps.
-	if tokenPending {
+	// On the mint path the token already rode the POST — the platform
+	// stored it at create and its observer claims the verified domains
+	// once the node is up — so the after-active save is skipped
+	// entirely.
+	if tokenPending && !mint {
 		waitGatewayActive(ctx, pd, orgID, &resp.Diagnostics)
 		if resp.Diagnostics.HasError() {
 			return
@@ -377,6 +398,8 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 			return
 		}
 		mapGateway(&data, gw)
+	}
+	if tokenPending {
 		data.RotateAPIToken = rotateTrigger
 		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 		if resp.Diagnostics.HasError() {
@@ -415,11 +438,13 @@ func (r *gatewayResource) Create(ctx context.Context, req resource.CreateRequest
 
 // adoptExistingGateway recovers a POST the org's singleton refused.
 // A row whose create-only fields match the config IS the gateway this
-// create asked for — adopt it with a warning (auth_key can't be
-// verified: write-only). A diverging row is named, with the only real
-// remediation. Returns false when the caller must stop (a diagnostic
-// is already set — either the original POST error when no row exists,
-// or the divergence).
+// create asked for — adopt it with a warning. On the legacy path the
+// warning disclaims the write-only auth_key; on the mint path the
+// platform holds the enrollment credential (minted from the create-time
+// api_token), so there is no auth_key to disclaim. A diverging row is
+// named, with the only real remediation. Returns false when the caller
+// must stop (a diagnostic is already set — either the original POST
+// error when no row exists, or the divergence).
 func adoptExistingGateway(ctx context.Context, pd *providerData, orgID string, data *gatewayModel, createErr error, diags *diag.Diagnostics) bool {
 	gw, err := pd.client.GetOrgGateway(ctx, orgID)
 	if err != nil {
@@ -437,13 +462,23 @@ func adoptExistingGateway(ctx context.Context, pd *providerData, orgID string, d
 		)
 		return false
 	}
-	diags.AddWarning(
-		"Adopted the organization's existing gateway",
-		fmt.Sprintf("The create was refused but gateway %s (%s) already serves tailnet %q as the config asks — "+
-			"Terraform now manages it. auth_key cannot be verified (the API never echoes it): the panel's re-paste "+
-			"is the recovery if the key ever needs rotating.",
-			gw.ID, gw.Hostname, gw.TailnetDomain),
-	)
+	if data.AuthKey.IsNull() || data.AuthKey.IsUnknown() {
+		diags.AddWarning(
+			"Adopted the organization's existing gateway",
+			fmt.Sprintf("The create was refused but gateway %s (%s) already serves tailnet %q as the config asks — "+
+				"Terraform now manages it. The platform holds the enrollment credential (the join key was minted from "+
+				"the create-time api_token); the panel's token paste covers rotation.",
+				gw.ID, gw.Hostname, gw.TailnetDomain),
+		)
+	} else {
+		diags.AddWarning(
+			"Adopted the organization's existing gateway",
+			fmt.Sprintf("The create was refused but gateway %s (%s) already serves tailnet %q as the config asks — "+
+				"Terraform now manages it. auth_key cannot be verified (the API never echoes it): the panel's re-paste "+
+				"is the recovery if the key ever needs rotating.",
+				gw.ID, gw.Hostname, gw.TailnetDomain),
+		)
+	}
 	mapGateway(data, gw)
 	return true
 }

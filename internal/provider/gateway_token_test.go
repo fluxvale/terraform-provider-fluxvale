@@ -103,6 +103,15 @@ func TestGatewayCreatePatchesWriteOnlyToken(t *testing.T) {
 		t.Errorf("PATCH api_token = %v, want the configured token", attrs["api_token"])
 	}
 
+	// Both credentials set keeps the legacy sequencing: the POST
+	// carries auth_key only — the token never rides the create body
+	// (the wire takes exactly one credential and would refuse both).
+	post := findOne(t, f.all(), http.MethodPost, "/api/v1/access-gateways")
+	if postAttrs := attrsOf(t, post); postAttrs["api_token"] != nil {
+		t.Errorf("POST api_token = %v, want absent — a both-set create sends the token only via the after-active PATCH",
+			postAttrs["api_token"])
+	}
+
 	var got gatewayModel
 	if diags := resp.State.Get(ctx, &got); diags.HasError() {
 		t.Fatalf("State.Get: %v", diags)

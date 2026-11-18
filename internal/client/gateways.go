@@ -119,16 +119,21 @@ func (c *Client) SetGatewayApiToken(ctx context.Context, orgID, id, token string
 type CreateGatewayInput struct {
 	OrganizationID string // "" omits — the server falls back to the actor's personal org
 	TailnetDomain  string
-	AuthKey        string // write-only: never rendered in any response
+	AuthKey        string // write-only: never rendered in any response — the legacy enrollment credential
+	// ApiToken is write-only: omitted when empty — the platform mints
+	// the join key from it (fluxvale/fluxvale#836). The wire takes
+	// exactly one credential: both (or neither) of AuthKey/ApiToken is
+	// a 400 whose pinned sentence surfaces verbatim.
+	ApiToken string
 }
 
 // CreateGateway calls POST /api/v1/access-gateways. The create is
-// synchronous server-side (it holds the auth key and rolls back on
-// failure) but lands the row :provisioning — the observer trigger is
-// the only promoter to :active, so attaching waits separately. The
-// monthly price is deliberately not sent: the create pins the
-// platform's config figure — a wire caller must not price their own
-// gateway.
+// synchronous server-side (it holds the enrollment credential and
+// rolls back on failure) but lands the row :provisioning — the
+// observer trigger is the only promoter to :active, so attaching waits
+// separately. The monthly price is deliberately not sent: the create
+// pins the platform's config figure — a wire caller must not price
+// their own gateway.
 func (c *Client) CreateGateway(ctx context.Context, in CreateGatewayInput) (AccessGateway, error) {
 	attrs := map[string]any{
 		"tailnet_domain": in.TailnetDomain,
@@ -136,6 +141,9 @@ func (c *Client) CreateGateway(ctx context.Context, in CreateGatewayInput) (Acce
 	}
 	if in.OrganizationID != "" {
 		attrs["organization_id"] = in.OrganizationID
+	}
+	if in.ApiToken != "" {
+		attrs["api_token"] = in.ApiToken
 	}
 	doc, err := c.Do(ctx, http.MethodPost, "/api/v1/access-gateways", map[string]any{
 		"data": map[string]any{"type": "access_gateway", "attributes": attrs},

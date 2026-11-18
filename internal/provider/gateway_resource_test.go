@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fluxvale/terraform-provider-fluxvale/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -129,10 +130,10 @@ func TestGatewayCreateBodyShapeAndState(t *testing.T) {
 	}
 }
 
-// A fresh create with NO auth_key is refused before any HTTP call —
-// the wire takes the key only at create and never echoes it, so there
-// is no later save to supply it.
-func TestGatewayCreateRejectsNullAuthKey(t *testing.T) {
+// A fresh create with NO credential at all is refused before any HTTP
+// call — the wire takes auth_key or api_token only at create and never
+// echoes either, so there is no later save to supply one.
+func TestGatewayCreateRequiresACredential(t *testing.T) {
 	ctx := context.Background()
 	r, sch := newSchemadGateway(ctx, t)
 
@@ -140,18 +141,27 @@ func TestGatewayCreateRejectsNullAuthKey(t *testing.T) {
 	f.orgsDoc = soleOrgDoc()
 	r.pd = f.testClient()
 
-	planData := testGateway(func(d *gatewayModel) { d.AuthKey = types.StringNull() })
+	planData := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.APIToken = types.StringNull()
+	})
 	req := resource.CreateRequest{
-		Plan: tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+		Config: gatewayConfigFor(ctx, t, sch, &planData),
 	}
 	resp := &resource.CreateResponse{
-		State: tfsdk.State{Schema: sch, Raw: tftypes.NewValue(sch.Type().TerraformType(ctx), nil)},
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
 	}
 	r.Create(ctx, req, resp)
 
-	assertError(t, &resp.Diagnostics, "auth_key is required", "import")
+	assertError(t, &resp.Diagnostics,
+		"auth_key or api_token is required to enable a gateway",
+		"the platform mints the join key from it",
+		"the auth_keys scope",
+		"the legacy two-paste path",
+		"import the existing gateway instead")
 	if len(f.all()) != 0 {
-		t.Errorf("requests = %+v, want none — the refusal is client-side, the POST needs a key", f.all())
+		t.Errorf("requests = %+v, want none — the refusal is client-side, the POST needs a credential", f.all())
 	}
 	if !resp.State.Raw.IsNull() {
 		t.Errorf("state = %v, want null (nothing created)", resp.State.Raw)
@@ -191,6 +201,163 @@ func TestGatewayCreateAdoptsExistingGateway(t *testing.T) {
 	}
 	if got.AuthKey.ValueString() != "tskey-test" {
 		t.Errorf("auth_key = %q, want the config value kept (unverifiable — the warning says so)", got.AuthKey.ValueString())
+	}
+}
+
+// The #836 mint path: no auth_key, the write-only token rides the
+// CREATE POST (the platform mints and stores the join key from it), so
+// the after-active token PATCH never runs — and neither credential
+// value ever enters state.
+func TestGatewayCreateMintsFromApiToken(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	f.gatewayGets = []scriptedResponse{script(200, gatewayProvisioningDoc)} // the final read only — no save wait
+	r.pd = f.testClient()
+
+	planData := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.APIToken = types.StringValue("tskey-api-MINT-secret")
+		d.RotateAPIToken = types.StringValue("v1")
+	})
+	req := resource.CreateRequest{
+		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+		Config: gatewayConfigFor(ctx, t, sch, &planData),
+	}
+	resp := &resource.CreateResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	r.Create(ctx, req, resp)
+	assertNoErrors(t, &resp.Diagnostics)
+
+	post := findOne(t, f.all(), http.MethodPost, "/api/v1/access-gateways")
+	attrs := attrsOf(t, post)
+	if attrs["api_token"] != "tskey-api-MINT-secret" {
+		t.Errorf("create api_token = %v, want the configured token riding the POST", attrs["api_token"])
+	}
+	if attrs["auth_key"] != "" {
+		t.Errorf("create auth_key = %v, want empty — the mint path sends no legacy key", attrs["auth_key"])
+	}
+	if hasRequest(f, http.MethodPatch, "/api/v1/access-gateways/gw-1/api-token") {
+		t.Error("the mint path ran the after-active token PATCH — the platform stores the token at create")
+	}
+
+	got := rawToGateway(ctx, t, sch, resp.State.Raw)
+	if !got.APIToken.IsNull() || !got.AuthKey.IsNull() {
+		t.Errorf("api_token/auth_key in state = %v/%v, want null — no key material lands in state", got.APIToken, got.AuthKey)
+	}
+	if got.RotateAPIToken.ValueString() != "v1" {
+		t.Errorf("rotate_api_token_on = %q, want the configured trigger restored in state", got.RotateAPIToken.ValueString())
+	}
+	if got.ID.ValueString() != "gw-1" {
+		t.Errorf("id = %q, want the created gateway tracked", got.ID.ValueString())
+	}
+}
+
+// The mint path's adoption: a refused POST over a matching singleton
+// adopts with the mint warning — the platform holds the enrollment
+// credential (minted from the create-time token), so the copy makes no
+// "cannot be verified" auth_key claim. No token save runs either.
+func TestGatewayCreateAdoptsMintedGateway(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	f.gatewayPostStatus = http.StatusConflict
+	f.gatewayPostDoc = `{"errors": [{"detail": "has already been taken"}]}`
+	f.gatewayGets = []scriptedResponse{script(200, gatewayActiveDoc)} // tailnet matches the config
+	r.pd = f.testClient()
+
+	planData := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.APIToken = types.StringValue("tskey-api-MINT-secret")
+	})
+	req := resource.CreateRequest{
+		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+		Config: gatewayConfigFor(ctx, t, sch, &planData),
+	}
+	resp := &resource.CreateResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	r.Create(ctx, req, resp)
+	assertNoErrors(t, &resp.Diagnostics)
+	assertWarning(t, &resp.Diagnostics, "Adopted the organization's existing gateway", "Terraform now manages it")
+
+	joined := ""
+	for _, d := range resp.Diagnostics.Warnings() {
+		joined += d.Summary() + " | " + d.Detail() + "\n"
+	}
+	if strings.Contains(joined, "cannot be verified") {
+		t.Errorf("mint-path adoption warning claims an unverifiable auth_key: %q", joined)
+	}
+	if hasRequest(f, http.MethodPatch, "/api/v1/access-gateways/gw-1/api-token") {
+		t.Error("the mint adoption saved the token out-of-band — the platform already holds it")
+	}
+
+	got := rawToGateway(ctx, t, sch, resp.State.Raw)
+	if got.ID.ValueString() != "gw-1" || got.State.ValueString() != "active" {
+		t.Errorf("id/state = %s/%s, want the adopted row tracked", got.ID.ValueString(), got.State.ValueString())
+	}
+}
+
+// The API's 400 mint refusals surface verbatim — the pinned sentence
+// rides the POST's errors body and lands in the diagnostic exactly as
+// the platform pinned it; the provider maps nothing locally.
+func TestGatewayCreateSurfacesMintRefusalVerbatim(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t)
+	f.orgsDoc = soleOrgDoc()
+	f.gatewayPostStatus = http.StatusBadRequest
+	f.gatewayPostDoc = `{"errors": [{"code": "invalid_argument",
+		"detail": "` + gatewayRefusalMissingScope + `",
+		"source": {"pointer": "/data/attributes/auth_key"}}]}`
+	f.gatewayGets = []scriptedResponse{script(http.StatusNotFound, `{"errors": [{"status": "404"}]}`)}
+	r.pd = f.testClient()
+
+	planData := testGateway(func(d *gatewayModel) {
+		d.AuthKey = types.StringNull()
+		d.APIToken = types.StringValue("tskey-api-NO-SCOPE")
+	})
+	req := resource.CreateRequest{
+		Plan:   tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+		Config: gatewayConfigFor(ctx, t, sch, &planData),
+	}
+	resp := &resource.CreateResponse{
+		State: tfsdk.State{Schema: sch, Raw: nullObject(ctx, t, sch.Type().TerraformType(ctx))},
+	}
+	r.Create(ctx, req, resp)
+
+	assertError(t, &resp.Diagnostics, "Unable to create the access gateway", gatewayRefusalMissingScope)
+	if !resp.State.Raw.IsNull() {
+		t.Errorf("state = %v, want null — the 400 is a pre-create refusal, nothing was created", resp.State.Raw)
+	}
+}
+
+// The fake enforces the #836 one-credential contract the way the
+// platform does, and the client surfaces the pinned sentences verbatim:
+// neither credential → 400 on auth_key, both → 400 on api_token.
+func TestGatewayCreateClientCredentialContract(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeAPI(t)
+	c := f.testClient().client
+
+	_, err := c.CreateGateway(ctx, client.CreateGatewayInput{TailnetDomain: "example.ts.net"})
+	if err == nil || !strings.Contains(err.Error(), gatewayRefusalNeitherCredential) {
+		t.Errorf("err = %v, want the neither-credential sentence verbatim", err)
+	}
+
+	_, err = c.CreateGateway(ctx, client.CreateGatewayInput{
+		TailnetDomain: "example.ts.net",
+		AuthKey:       "tskey-test",
+		ApiToken:      "tskey-api-secret",
+	})
+	if err == nil || !strings.Contains(err.Error(), gatewayRefusalBothCredentials) {
+		t.Errorf("err = %v, want the both-credentials sentence verbatim", err)
 	}
 }
 
@@ -714,6 +881,46 @@ func TestGatewayModifyPlanRejectsReplacement(t *testing.T) {
 	r.ModifyPlan(ctx, req, resp)
 
 	assertError(t, &resp.Diagnostics, "rejected", "cannot succeed", "tailnet_domain", "panel", "-replace")
+}
+
+// An auth_key change in either direction still plans a replacement,
+// and replacements stay rejected — the write-only key cannot be
+// verified or migrated, and the create half would conflict regardless
+// of which credential the replacement carries.
+func TestGatewayModifyPlanRejectsAuthKeyChange(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadGateway(ctx, t)
+
+	f := newFakeAPI(t) // no HTTP — ModifyPlan is wire-free
+	r.pd = f.testClient()
+
+	deployed := testGateway(func(d *gatewayModel) { d.ID = types.StringValue("gw-1") })
+	imported := testGateway(func(d *gatewayModel) {
+		d.ID = types.StringValue("gw-1")
+		d.AuthKey = types.StringNull()
+	})
+	cases := []struct {
+		name      string
+		stateData gatewayModel
+		planMut   func(d *gatewayModel)
+	}{
+		{"added over an imported null", imported, func(d *gatewayModel) { d.AuthKey = types.StringValue("tskey-new") }},
+		{"changed", deployed, func(d *gatewayModel) { d.AuthKey = types.StringValue("tskey-other") }},
+		{"removed", deployed, func(d *gatewayModel) { d.AuthKey = types.StringNull() }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			planData := tc.stateData
+			tc.planMut(&planData)
+			req := resource.ModifyPlanRequest{
+				Plan:  tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)},
+				State: tfsdk.State{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &tc.stateData)},
+			}
+			resp := &resource.ModifyPlanResponse{Plan: tfsdk.Plan{Schema: sch, Raw: gatewayToRaw(ctx, t, sch, &planData)}}
+			r.ModifyPlan(ctx, req, resp)
+			assertError(t, &resp.Diagnostics, "rejected", "auth_key")
+		})
+	}
 }
 
 // Equal plan and state (and the create/destroy shapes, where there is
