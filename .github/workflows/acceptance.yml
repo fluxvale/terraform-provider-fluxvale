@@ -28,6 +28,13 @@
 #     NOTE: the gateway has no API delete route, so its first
 #     acceptance run is a standing monthly charge; later runs adopt
 #     the existing gateway.
+#   - TF_ACC_TAILNET_DOMAIN/TF_ACC_TAILSCALE_API_TOKEN — the #836 mint
+#     gateway class (api_token alone; the platform mints the join
+#     key). Same standing-charge caveat as above. The value is a
+#     Tailscale API access token — NOT an auth key — minted from a
+#     tailnet owner/admin account with the scopes dns devices:routes
+#     devices:core:read auth_keys (auth_keys is what authorizes the
+#     platform's join-key mint).
 #   - TF_ACC_DOMAIN — the custom domain class.
 #   - TF_ACC_POCKET_ID_INSTANCE_ID — the PocketID SSO class (the
 #     PocketID instance id; public + custody-ready, flag on). Optional
@@ -130,6 +137,13 @@ jobs:
           TF_ACC_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.TF_ACC_BACKUP_SECRET_ACCESS_KEY }}
           TF_ACC_TAILNET_DOMAIN: ${{ secrets.TF_ACC_TAILNET_DOMAIN }}
           TF_ACC_TAILSCALE_AUTH_KEY: ${{ secrets.TF_ACC_TAILSCALE_AUTH_KEY }}
+          # The #836 mint class: a Tailscale API access token with the
+          # scopes dns devices:routes devices:core:read auth_keys (the
+          # mint needs auth_keys — see the tiered header above).
+          # Sourced from the repo secret TAILSCALE_API_TOKEN, which
+          # must be created; until it exists this resolves to empty
+          # and the mint class skips (like the other optional tiers).
+          TF_ACC_TAILSCALE_API_TOKEN: ${{ secrets.TAILSCALE_API_TOKEN }}
           TF_ACC_DOMAIN: ${{ secrets.TF_ACC_DOMAIN }}
           TF_ACC_POCKET_ID_INSTANCE_ID: ${{ secrets.TF_ACC_POCKET_ID_INSTANCE_ID }}
           TF_ACC_SSO_APP_SLUG: ${{ secrets.TF_ACC_SSO_APP_SLUG }}

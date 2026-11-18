@@ -185,14 +185,18 @@ resource "fluxvale_custom_domain" "apps" {
 # API delete — destroy removes it from state only; opt out via the
 # panel's Access tab. It is unconditional here: even with zero
 # private instances it still creates and bills — remove this resource
-# to skip it. If the org already has one, ADOPT it: set
-# tailscale_auth_key null in terraform.tfvars first (any auth_key
-# value after an import plans a replacement, and replacements are
-# rejected at plan time), then `terraform import
+# to skip it. If the org already has one, ADOPT it by import —
+# neither credential is needed (an import reads the existing gateway;
+# leave the token unset): `terraform import
 # fluxvale_access_gateway.owner <org_id_or_slug>`.
 resource "fluxvale_access_gateway" "owner" {
   tailnet_domain = var.tailnet_domain
-  auth_key       = var.tailscale_auth_key
+
+  # Write-only: the platform mints the gateway's join key from this
+  # token (ephemeral var; the pairing checklist in README.md) —
+  # nothing pasted in the Tailscale admin console. Null on an
+  # adopt-by-import.
+  api_token = var.tailscale_api_token
 
   # Uncomment once the gateway exists (org slug or id): an unset
   # organization re-plans unknown against the stored id and shows a

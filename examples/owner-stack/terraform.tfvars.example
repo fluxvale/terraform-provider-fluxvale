@@ -1,7 +1,9 @@
 # Copy to terraform.tfvars and fill in your real values (the copy is
 # gitignored — this directory's .gitignore). The FluxVale PAT does NOT
-# go in this file: export FLUXVALE_PAT instead (README.md). Placeholder
-# strings fail the providers' format checks — expected until filled.
+# go in this file: export FLUXVALE_PAT instead (README.md). The
+# Tailscale API token does NOT go here either: export
+# TF_VAR_tailscale_api_token instead. Placeholder strings fail the
+# providers' format checks — expected until filled.
 
 # The state/plan encryption passphrase is NOT in this file: export
 # TF_VAR_state_passphrase from the keychain or a secret manager
@@ -17,9 +19,6 @@ r2_access_key_id      = "REPLACE_ME_R2_ACCESS_KEY_ID"
 r2_secret_access_key  = "REPLACE_ME_R2_SECRET_ACCESS_KEY"
 
 tailnet_domain = "REPLACE-ME.ts.net" # the tailnet's MagicDNS suffix
-# Set when ENABLING the gateway (a fresh create). Null when ADOPTING an
-# existing one by import — a value there plans a rejected replacement.
-tailscale_auth_key = null
 
 # The instances, keyed by name (= the backups prefix). The default
 # three below are the skeleton's representative shapes — override the

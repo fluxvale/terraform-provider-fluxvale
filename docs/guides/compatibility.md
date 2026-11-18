@@ -76,5 +76,16 @@ rotation clock) and the claimed domain names do. On create the token is
 sent once, after the gateway serves; afterwards it is sent only when
 `rotate_api_token_on` changes. Import leaves both token attributes null.
 
+## Gateway mint enrollment (from 0.6.0)
+
+From 0.6.0, `fluxvale_access_gateway` can be enabled with `api_token`
+alone: the platform mints the gateway's join key from the token (it
+needs Tailscale's `auth_keys` scope, alongside `dns`, `devices:routes`,
+and `devices:core:read`). `auth_key` remains the documented fallback:
+paste a join key minted in the Tailscale admin console instead. No
+renames and no changed attribute semantics — the stable names above are
+untouched, and existing `auth_key` configurations keep working as
+before.
+
 **1.0 freeze**: when the first non-owner user writes `.tf` against this
 provider. From then on, removals and renames are versioned decisions.
