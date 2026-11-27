@@ -160,12 +160,13 @@ func TestProviderRegistrations(t *testing.T) {
 	p := New("test")()
 
 	wantResources := map[string]bool{
-		"fluxvale_organization":     false,
-		"fluxvale_instance":         false,
-		"fluxvale_instance_backups": false,
-		"fluxvale_access_gateway":   false,
-		"fluxvale_custom_domain":    false,
-		"fluxvale_pocket_id_sso":    false,
+		"fluxvale_organization":      false,
+		"fluxvale_instance":          false,
+		"fluxvale_instance_backups":  false,
+		"fluxvale_access_gateway":    false,
+		"fluxvale_custom_domain":     false,
+		"fluxvale_pocket_id_sso":     false,
+		"fluxvale_instance_hostname": false,
 	}
 	resources := p.Resources(ctx)
 	if len(resources) != len(wantResources) {

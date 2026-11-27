@@ -100,6 +100,15 @@ type fakeAPI struct {
 	orgDeleteStatus int
 	orgDeleteDoc    string
 
+	// instance-hostname slice: the mint POST, the instance-scoped
+	// list, and the row DELETE (statuses script the refusal arms —
+	// the 400/409 row-stands and the 404 already-gone).
+	hostnamesPostStatus   int
+	hostnamesPostDoc      string
+	hostnamesListDoc      string
+	hostnamesDeleteStatus int
+	hostnamesDeleteDoc    string
+
 	t *testing.T
 }
 
@@ -127,6 +136,26 @@ const (
 	// both accepted shapes — the mix, a lone half, and an empty save
 	// all answer it, each on its offending field.
 	gatewayRefusalPatchPairHalf = "Save the client id and secret together, or the API token alone"
+)
+
+// The instance-hostname mint/remove refusals — the platform's own
+// words (apps/platform/lib/flux_vale/contexts/infrastructure/resources/
+// instance_hostname.ex: the @mint_refusals and @remove_refusals maps,
+// plus the label attribute's match constraint). The fake serves them
+// verbatim and the tests assert them verbatim — no local mapping in
+// the provider.
+const (
+	hostnameRefusalDifferentOrg = "that domain belongs to a different organization"
+	hostnameRefusalNotCustom    = "only a custom domain can host a custom address"
+	hostnameRefusalNotVerified  = "verify the domain before adding addresses to it"
+	// The unique-identity duplicate: the platform's route test pins the
+	// status (400 or 409) but not the wording — this sentence is the
+	// fake's stand-in, asserted as-served.
+	hostnameRefusalDuplicate = "has already been taken"
+	// The two row-stands refusals (the platform's @mint_refusals copy):
+	hostnameRefusalRestart     = "The address was added, but the app could not be restarted to pick it up. It will pick it up on its next change or a redeploy."
+	hostnameRefusalAppNotTold  = "The address was added, but the app could not be updated to use it. It will pick it up on a redeploy."
+	hostnameRefusalPlatformRow = "the default address is not removable"
 )
 
 type scriptedResponse struct {
@@ -162,6 +191,12 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		pocketIDDisconnectDoc:    pocketIDDisconnectDoc,
 		pocketIDRotateStatus:     http.StatusCreated,
 		pocketIDRotateDoc:        pocketIDRotatedFlat,
+
+		hostnamesPostStatus:   http.StatusCreated,
+		hostnamesPostDoc:      hostnameRowDoc,
+		hostnamesListDoc:      hostnamesDefaultListDoc,
+		hostnamesDeleteStatus: http.StatusOK,
+		hostnamesDeleteDoc:    hostnameDeleteDoc,
 	}
 	mux := http.NewServeMux()
 
@@ -279,6 +314,22 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pocket-id-wiring"):
 			f.record(r, nil)
 			f.scriptedGet(w, r, &f.pocketIDWiringGets)
+			return
+
+		// The instance's hostnames: the mint POST (instance_id rides
+		// the path, never the body — the attributes are exactly
+		// access_domain_id + label) and the instance-scoped list read.
+		// Handled in this subtree like the PocketID legs above, clear
+		// of the by-slug pattern's overlap.
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/hostnames"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.record(r, body)
+			f.json(w, f.hostnamesPostStatus, f.hostnamesPostDoc)
+			return
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/hostnames"):
+			f.record(r, nil)
+			f.json(w, http.StatusOK, f.hostnamesListDoc)
 			return
 		}
 
@@ -451,6 +502,19 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 	mux.HandleFunc("DELETE /api/v1/access-domains/{id}", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r, nil)
 		f.json(w, f.domainDeleteStatus, f.domainDeleteDoc)
+	})
+
+	// Instance-hostname removes: a subtree of its own (no overlap with
+	// anything above — a distinct top-level segment). The 200 renders
+	// the removed row flat (no JSON:API envelope), which the client
+	// absorbs harmlessly.
+	mux.HandleFunc("/api/v1/instance-hostnames/", func(w http.ResponseWriter, r *http.Request) {
+		f.record(r, nil)
+		if r.Method != http.MethodDelete {
+			f.json(w, http.StatusMethodNotAllowed, `{"errors": [{"title": "Method Not Allowed"}]}`)
+			return
+		}
+		f.json(w, f.hostnamesDeleteStatus, f.hostnamesDeleteDoc)
 	})
 
 	// fluxvale/fluxvale#783: the row-free delegation preview the data source reads.
@@ -727,6 +791,26 @@ const (
 
 	// The idempotent arm: nothing wired — still a success.
 	pocketIDDisconnectNoWiringDoc = `{"instance_id": "inst-1", "client_deleted": false}`
+
+	// The instance-hostname rows: the pinned field set — id rides the
+	// document, the attributes are exactly label/instance_id/
+	// access_domain_id. host-2 is the custom address (git under
+	// dom-1); the platform-minted default row (the instance slug under
+	// the platform domain) leads every list — oldest first.
+	hostnameDefaultRowJSON = `{"id": "host-1", "type": "instance_hostname", "attributes": {
+		"label": "velvety-otter-1234", "instance_id": "inst-1", "access_domain_id": "dom-default"}}`
+
+	hostnameCustomRowJSON = `{"id": "host-2", "type": "instance_hostname", "attributes": {
+		"label": "git", "instance_id": "inst-1", "access_domain_id": "dom-1"}}`
+
+	// The mint's 201: the row it created.
+	hostnameRowDoc = `{"data": ` + hostnameCustomRowJSON + `}`
+
+	// The instance's list: the default slug row + the custom row.
+	hostnamesDefaultListDoc = `{"data": [` + hostnameDefaultRowJSON + `,` + hostnameCustomRowJSON + `]}`
+
+	// The remove's 200 renders the row flat (no JSON:API envelope).
+	hostnameDeleteDoc = `{"id": "host-2", "label": "git", "instance_id": "inst-1", "access_domain_id": "dom-1"}`
 )
 
 // statusDoc renders the running fixture with a different status — the
