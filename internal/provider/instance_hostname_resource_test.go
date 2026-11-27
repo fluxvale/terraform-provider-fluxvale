@@ -229,9 +229,11 @@ func TestInstanceHostnameCreateAdoptsStandingRow(t *testing.T) {
 	}
 }
 
-// A 400 or 409 whose probe finds NO identical row (or the probe itself
-// errors) is the original refusal verbatim — no adoption, no state,
-// no warning. The next apply re-mints.
+// A 400 or 409 whose probe runs and finds NO identical row is the
+// original refusal verbatim — no adoption, no state, no warning. (The
+// probe-errors arm is this table's neighbor, not its case: the test
+// below drives it, and the refusal there carries an honest unverified
+// note.) The next apply re-mints.
 func TestInstanceHostnameCreateRefusedWithoutStandingRow(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -271,6 +273,48 @@ func TestInstanceHostnameCreateRefusedWithoutStandingRow(t *testing.T) {
 				t.Errorf("warnings = %+v, want none (nothing was adopted)", resp.Diagnostics.Warnings())
 			}
 		})
+	}
+}
+
+// The probe itself failing is NOT "no row stands": a row-stands 400
+// whose follow-up list read fails (500) surfaces the original refusal
+// verbatim — complete, unmodified — with the honest unverified note
+// appended after it, no adoption, no state, no warning. Re-applying
+// probes again; `terraform import` adopts a row that stands.
+func TestInstanceHostnameCreateRefusedWhenProbeListFails(t *testing.T) {
+	ctx := context.Background()
+	r, sch := newSchemadInstanceHostname(ctx, t)
+
+	f := newFakeAPI(t)
+	f.hostnamesPostStatus = http.StatusBadRequest
+	f.hostnamesPostDoc = refusalDoc(hostnameRefusalRestart)
+	f.hostnamesListStatus = http.StatusInternalServerError // the probe's list read fails
+	r.pd = f.testClient()
+
+	planData := testInstanceHostname()
+	req := resource.CreateRequest{
+		Plan: tfsdk.Plan{Schema: sch, Raw: instanceHostnameToRaw(ctx, t, sch, &planData)},
+	}
+	resp := &resource.CreateResponse{
+		State: tfsdk.State{Schema: sch, Raw: tftypes.NewValue(sch.Type().TerraformType(ctx), nil)},
+	}
+	r.Create(ctx, req, resp)
+
+	// The verbatim refusal stays complete, and the note rides after it.
+	assertError(t, &resp.Diagnostics, "Unable to add the custom address",
+		hostnameRefusalRestart,
+		"Whether the address already stands is unverified",
+		"terraform import")
+	if !strings.Contains(resp.Diagnostics.Errors()[0].Detail(), hostnameRefusalRestart+"\n\nWhether") {
+		t.Errorf("error detail = %q, want the verbatim refusal intact with the note clearly separated after it",
+			resp.Diagnostics.Errors()[0].Detail())
+	}
+	findOne(t, f.all(), http.MethodGet, "/api/v1/instances/inst-1/hostnames") // the probe really ran
+	if !resp.State.Raw.IsNull() {
+		t.Errorf("state = %v, want null (the refusal stands; nothing was adopted)", resp.State.Raw)
+	}
+	if len(resp.Diagnostics.Warnings()) != 0 {
+		t.Errorf("warnings = %+v, want none (nothing was adopted)", resp.Diagnostics.Warnings())
 	}
 }
 

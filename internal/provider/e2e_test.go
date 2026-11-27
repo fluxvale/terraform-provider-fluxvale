@@ -650,9 +650,13 @@ data "fluxvale_instance" "b_by_id" {
 		case r.method == "POST" && r.path == "/api/v1/instances" && firstInstancePost < 0:
 			firstInstancePost = i
 		// inst-2's own DELETE is the more specific case — it wins over
-		// the subtree prefix below (the by-slug-before-subtree rule).
+		// the subtree prefix below (the by-slug-before-subtree rule),
+		// so it must carry that case's bookkeeping too: it feeds BOTH
+		// instanceBDelete and lastInstanceDelete, or the org-last guard
+		// would silently stop covering this DELETE.
 		case r.method == "DELETE" && r.path == "/api/v1/instances/inst-2":
 			instanceBDelete = i
+			lastInstanceDelete = i
 		case r.method == "DELETE" && strings.HasPrefix(r.path, "/api/v1/instances/"):
 			lastInstanceDelete = i
 		case r.method == "DELETE" && strings.HasPrefix(r.path, "/api/v1/instance-hostnames/"):
@@ -1008,21 +1012,30 @@ func newSmokeFake(t *testing.T) *smokeFake {
 		}
 		switch r.Method {
 		case http.MethodGet:
+			// The hostname list is checked BEFORE the deleted-instance
+			// 404: the platform's list is index semantics — a deleted
+			// instance answers 200 [] (its rows cascaded with it),
+			// never a 404. The bare detail below keeps its
+			// 404-on-deleted.
+			if action == "hostnames" {
+				if f.isDeleted(id) {
+					f.json(w, http.StatusOK, `{"data": []}`)
+					return
+				}
+				f.json(w, http.StatusOK, f.hostnameListDoc(id))
+				return
+			}
 			if f.isDeleted(id) {
 				f.json(w, http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`)
 				return
 			}
 			// The backup row keeps its scripted read; instance detail
 			// repeats until the delete marker, but only for a real row
-			// and the bare detail action. The hostname list is served
-			// WITHOUT the unknown-id error: the platform's list answers
-			// 200 [] for a gone instance — index semantics.
+			// and the bare detail action. The hostname list above is
+			// served WITHOUT the unknown-id error: the platform's list
+			// answers 200 [] for a gone instance — index semantics.
 			if action == "backup-setting" {
 				f.scripted(w, rest)
-				return
-			}
-			if action == "hostnames" {
-				f.json(w, http.StatusOK, f.hostnameListDoc(id))
 				return
 			}
 			if action != "" {

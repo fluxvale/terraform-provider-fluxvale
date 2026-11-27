@@ -105,6 +105,7 @@ type fakeAPI struct {
 	// the 400/409 row-stands and the 404 already-gone).
 	hostnamesPostStatus   int
 	hostnamesPostDoc      string
+	hostnamesListStatus   int
 	hostnamesListDoc      string
 	hostnamesDeleteStatus int
 	hostnamesDeleteDoc    string
@@ -329,6 +330,10 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 			return
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/hostnames"):
 			f.record(r, nil)
+			if f.hostnamesListStatus != 0 {
+				f.json(w, f.hostnamesListStatus, `{"errors": [{"title": "list failed"}]}`)
+				return
+			}
 			f.json(w, http.StatusOK, f.hostnamesListDoc)
 			return
 		}

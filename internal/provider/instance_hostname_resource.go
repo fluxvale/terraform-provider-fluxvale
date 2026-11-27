@@ -151,10 +151,16 @@ func (r *instanceHostnameResource) Create(ctx context.Context, req resource.Crea
 		// not pinned), never the sentence: the platform's copy may
 		// drift; its status classes are the contract.
 		var apiErr *client.APIError
+		probeFailed := false
 		if errors.As(err, &apiErr) &&
 			(apiErr.Status == http.StatusBadRequest || apiErr.Status == http.StatusConflict) {
 			rows, lerr := pd.client.ListInstanceHostnames(ctx, data.InstanceID.ValueString())
-			if lerr == nil {
+			if lerr != nil {
+				// The probe could not check whether an identical row
+				// stands — the refusal below must say so honestly, not
+				// imply a quiet "nothing is ours".
+				probeFailed = true
+			} else {
 				for _, row := range rows {
 					if row.AccessDomainID == data.AccessDomainID.ValueString() &&
 						row.Label == data.Label.ValueString() {
@@ -174,8 +180,18 @@ func (r *instanceHostnameResource) Create(ctx context.Context, req resource.Crea
 		// Any other error (the 403 / 404 fences, 5xx) — and a 400/409
 		// whose probe found no standing row: the original refusal, the
 		// server's wording verbatim. Nothing landed (or nothing is
-		// ours) — no state.
-		resp.Diagnostics.AddError("Unable to add the custom address", err.Error())
+		// ours) — no state. A 400/409 whose probe itself failed gets
+		// the same verbatim refusal, plus a clearly-separated note
+		// after it: the follow-up list read failed, so whether the row
+		// stands is unverified — appended, never a rewrite.
+		detail := err.Error()
+		if probeFailed {
+			detail += "\n\n" +
+				"Whether the address already stands is unverified: the provider's follow-up check — reading this " +
+				"instance's hostname list for an identical row — failed. Re-applying probes again; if a row stands, " +
+				"`terraform import` with the two-part id <instance_id>/<hostname_id> adopts it."
+		}
+		resp.Diagnostics.AddError("Unable to add the custom address", detail)
 		return
 	}
 
