@@ -156,16 +156,16 @@ resource "fluxvale_instance_backups" "apps" {
 
 # Custom-domain registrations, for the dogfood pairings: setting an
 # instance's `domain` (var.instances) registers the NAME on the
-# private-access edge. That is all the platform can express today —
-# there is no instance-domain attachment (instance hostnames mint
-# only under the platform domain), so a registered row serves
-# NOTHING yet; linking names to instances is the dogfood plan's to
-# build. The skeleton's defaults leave every domain null — forgejo →
-# git.fluxvale.com and umami → analytics.fluxvale.com ride as
-# documented placeholders (terraform.tfvars.example), pending that
-# plan, which owns the domain/OIDC/money-gate decisions. Registration
-# passes the org-wallet gate, and the create waits out DNS-01 (45m) —
-# see examples/personal-stack's custom-domain.tf for the full notes.
+# private-access edge — the registration is the domain row. Each
+# instance's label under it is a fluxvale_instance_hostname resource
+# (instance_id + access_domain_id + label), minted under the verified
+# domain — see docs/resources/instance_hostname.md and examples/
+# personal-stack's custom-addresses.tf. The skeleton's defaults leave
+# every domain null — forgejo → git.fluxvale.com and umami →
+# analytics.fluxvale.com ride as documented placeholders
+# (terraform.tfvars.example). Registration passes the org-wallet
+# gate, and the create waits out DNS-01 (45m) — see examples/
+# personal-stack's custom-domain.tf for the full notes.
 resource "fluxvale_custom_domain" "apps" {
   for_each = { for k, v in var.instances : k => v if v.domain != null }
 

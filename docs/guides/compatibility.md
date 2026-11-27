@@ -17,6 +17,7 @@ done silently in 0.x:
   - `fluxvale_access_gateway`
   - `fluxvale_custom_domain`
   - `fluxvale_pocket_id_sso`
+  - `fluxvale_instance_hostname`
   - `fluxvale_apps` (data source — the catalog)
   - `fluxvale_app_versions` (data source)
   - `fluxvale_instance` (data source — read by id or slug)
@@ -106,6 +107,15 @@ an older CLI, leave the pair out and paste it in the panel. The value
 never enters state or plan; rotating it is a trigger bump
 (`rotate_ts_client_secret_on`), an in-place PATCH — never a
 replacement.
+
+## fluxvale_instance_hostname (additive, v0.8.0)
+
+`fluxvale_instance_hostname` is new in 0.8.0: three required
+attributes (`instance_id`, `access_domain_id`, `label`) and one
+computed (`id`) — the attribute names mirror the `/api/v1` field
+names they map. The import id is `<instance_id>/<hostname_id>`.
+Existing configurations need no change, and the provider's Terraform
+floor is unchanged.
 
 **1.0 freeze**: when the first non-owner user writes `.tf` against this
 provider. From then on, removals and renames are versioned decisions.

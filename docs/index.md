@@ -45,6 +45,7 @@ Resources:
 - [`fluxvale_access_gateway`](resources/access_gateway.md) — the org's private-access gateway
 - [`fluxvale_custom_domain`](resources/custom_domain.md) — your own domain on the private-access edge
 - [`fluxvale_pocket_id_sso`](resources/pocket_id_sso.md) — an instance's PocketID sign-in wiring
+- [`fluxvale_instance_hostname`](resources/instance_hostname.md) — an instance's custom address (a label under a verified custom domain)
 
 Data sources:
 
@@ -58,6 +59,10 @@ Guides: [Installing the provider](guides/install.md) · [Secrets in Terraform](g
 ## Upgrading to v0.5.0
 
 `fluxvale_organization` (resource) and `fluxvale_domain_delegation` (data source) are new in v0.5.0. The platform's matching change scopes the org list — which every org-scoped resource resolves through — so reads now require `organizations:read`. Re-mint tokens minted before v0.5.0, or the first org resolution 403s mid-apply. Managing the org resource itself also needs `organizations:write`; the delegation data source is a gateway-family read and needs `gateways:read`.
+
+## Upgrading to v0.8.0
+
+`fluxvale_instance_hostname` (resource) is new in v0.8.0. The release is additive — existing configurations need no change. It needs the `instances:write` scope (which implies `instances:read`); no other behavior moved.
 
 ## 0.x compatibility
 

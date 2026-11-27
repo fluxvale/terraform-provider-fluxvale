@@ -92,6 +92,27 @@ func (c *Client) GetAccessDomain(ctx context.Context, id string) (AccessDomain, 
 	return domain, nil
 }
 
+// ListAccessDomains calls GET
+// /api/v1/organizations/:organization_id/access-domains — the org's
+// domains, the platform row included. Scoped gateways:read (write
+// implies read). The platform-wide name uniqueness lives in the
+// register validation, not this list.
+func (c *Client) ListAccessDomains(ctx context.Context, organizationID string) ([]AccessDomain, error) {
+	doc, err := c.DoList(ctx, http.MethodGet, "/api/v1/organizations/"+organizationID+"/access-domains", nil)
+	if err != nil {
+		return nil, err
+	}
+	domains := make([]AccessDomain, 0, len(doc.Data))
+	for _, row := range doc.Data {
+		domain, err := accessDomainFromResource(row)
+		if err != nil {
+			return nil, shapeDrift("GET /api/v1/organizations/:id/access-domains", row.ID, err)
+		}
+		domains = append(domains, domain)
+	}
+	return domains, nil
+}
+
 // DeleteAccessDomain calls DELETE /api/v1/access-domains/:id — the
 // FULL teardown server-side: hostname pre-check, tailnet unclaim, row
 // destroy, CoreDNS re-render, Certificate safe-delete. Synchronous —

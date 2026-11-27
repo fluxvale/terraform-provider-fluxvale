@@ -182,6 +182,16 @@ resource "fluxvale_access_gateway" "g" {
   instances      = [fluxvale_instance.b.id]
 }
 
+# The instance's custom address: one row under a custom domain. The
+# domain id is a literal here — the reference composition
+# (fluxvale_custom_domain.<n>.id) is plain Terraform, nothing
+# provider-side; the smoke's job is the resource's own RPC path.
+resource "fluxvale_instance_hostname" "b" {
+  instance_id      = fluxvale_instance.b.id
+  access_domain_id = "dom-smoke-custom"
+  label            = "git"
+}
+
 # The lookup data source, both forms, against the created row: slug is
 # the cross-stack handle; id is the unambiguous one.
 data "fluxvale_instance" "b_by_slug" {
@@ -228,8 +238,8 @@ data "fluxvale_instance" "b_by_id" {
 	}
 
 	plan := runTofu(clipath, "plan", "-out=tfplan")
-	if !strings.Contains(plan, "6 to add") {
-		t.Fatalf("plan did not add the six resources (org + three instances + backups + gateway):\n%s", plan)
+	if !strings.Contains(plan, "7 to add") {
+		t.Fatalf("plan did not add the seven resources (org + three instances + backups + gateway + the custom hostname):\n%s", plan)
 	}
 	assertSecretNotInPlan(t, work, secretOne)
 	runTofu(clipath, "apply", "tfplan")
@@ -265,6 +275,38 @@ data "fluxvale_instance" "b_by_id" {
 			return id
 		}
 		t.Fatalf("fluxvale_instance.b is not in state")
+		return ""
+	}
+	// hostnameBID is instanceBID's sibling for the hostname row: the
+	// import id's second half — <instance_id>/<hostname_id>.
+	hostnameBID := func() string {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(work, "terraform.tfstate"))
+		if err != nil {
+			t.Fatalf("read terraform state: %v", err)
+		}
+		var st struct {
+			Resources []struct {
+				Type, Name string
+				Instances  []struct {
+					Attributes map[string]any `json:"attributes"`
+				} `json:"instances"`
+			} `json:"resources"`
+		}
+		if err := json.Unmarshal(raw, &st); err != nil {
+			t.Fatalf("decode terraform state: %v", err)
+		}
+		for _, res := range st.Resources {
+			if res.Type != "fluxvale_instance_hostname" || res.Name != "b" || len(res.Instances) == 0 {
+				continue
+			}
+			id, _ := res.Instances[0].Attributes["id"].(string)
+			if id == "" {
+				t.Fatalf("fluxvale_instance_hostname.b has no id in state")
+			}
+			return id
+		}
+		t.Fatalf("fluxvale_instance_hostname.b is not in state")
 		return ""
 	}
 	// stateRaw is the literal terraform.tfstate the write-only proof
@@ -450,14 +492,42 @@ data "fluxvale_instance" "b_by_id" {
 		t.Fatalf("instance b id changed across an env clear: %q -> %q", idBefore, id)
 	}
 
+	// The import leg — a real CLI exercising ImportState. The two-part
+	// id is read from the applied state BEFORE the rm: the helpers read
+	// terraform.tfstate, which no longer carries the resource once
+	// state rm forgets it. state rm forgets the row; import re-adopts
+	// it by the two-part id <instance_id>/<hostname_id> (the read
+	// surface is instance-scoped, there is no GET by hostname id, so
+	// the import names the instance to list under and the row to find —
+	// the RPC path is ImportState setting the two ids, then Read
+	// listing the instance's hostnames and matching the row, which
+	// fills label and access_domain_id from the wire); the following
+	// plan must converge with no diff. The import-id grammar and the
+	// import-then-read fill are plugin-RPC behavior only a real CLI
+	// exercises.
+	importID := instanceBID() + "/" + hostnameBID()
+	runTofu(clipath, "state", "rm", "fluxvale_instance_hostname.b")
+	runTofu(clipath, "import", "fluxvale_instance_hostname.b", importID)
+	importPlan := runTofu(clipath, "plan", "-out=tfplan2")
+	// The import converged with no diff. NB: a converged plan prints
+	// NO "Plan: N to add, N to change, N to destroy" summary at all —
+	// OpenTofu's verdict for the 0/0/0 counts is "No changes." (the
+	// summary line only rides a plan that moves something, which is
+	// where the env-step assertions read it). Assert that verdict and
+	// the absence of a summary: any diff would print one.
+	if !strings.Contains(importPlan, "No changes.") || strings.Contains(importPlan, "Plan:") {
+		t.Fatalf("the imported hostname did not converge — import left a diff:\n%s", importPlan)
+	}
+
 	runTofu(clipath, "destroy", "-auto-approve")
 
 	// The wire story: create → posture PATCHes (exposure on b,
-	// always-on on c) → deploy → backup row → gateway + attach; two
-	// in-place env merges on b; destroy: forget-only gateway, row
-	// DELETE, all three instances DELETEd to a polled 404. The env
-	// updates add no POST and no replacement: both counts stay at the
-	// create-time figures.
+	// always-on on c) → deploy → backup row → gateway + attach →
+	// hostname mint; two in-place env merges on b; import (a read, no
+	// writes); destroy: the hostname row DELETE, forget-only gateway,
+	// backup row DELETE, all three instances DELETEd to a polled 404.
+	// The env updates add no POST and no replacement: both counts stay
+	// at the create-time figures.
 	fake.wantCounts(t,
 		countExact("POST", "/api/v1/organizations", 1),
 		countExact("DELETE", "/api/v1/organizations/org-1", 1),
@@ -467,11 +537,13 @@ data "fluxvale_instance" "b_by_id" {
 		countSuffix("PATCH", "/deploy", 3),
 		countSuffix("PATCH", "/env", 3),
 		countSuffix("POST", "/backup-setting", 1),
+		countSuffix("POST", "/hostnames", 1), // the apply's mint
 		countExact("POST", "/api/v1/access-gateways", 1),
 		countContains("POST", "/attachments", 1),
 		countPrefix("DELETE", "/api/v1/instances/", 3),
 		countPrefix("DELETE", "/api/v1/backup-settings/", 1),
-		countContains("DELETE", "/attachments/", 0), // destroy is a state-only forget
+		countPrefix("DELETE", "/api/v1/instance-hostnames/", 1), // the destroy
+		countContains("DELETE", "/attachments/", 0),             // destroy is a state-only forget
 	)
 
 	// The write BODIES, not just counts:
@@ -545,6 +617,20 @@ data "fluxvale_instance" "b_by_id" {
 			fake.trafficDump())
 	}
 
+	// The hostname's read surface is the instance-scoped list: the
+	// refreshes and the import read all ride it (plans re-read, so the
+	// count is not fixed — at least one is the claim).
+	hostnameListReads := 0
+	for _, r := range fake.all() {
+		if r.method == "GET" && strings.HasSuffix(r.path, "/hostnames") {
+			hostnameListReads++
+		}
+	}
+	if hostnameListReads == 0 {
+		t.Fatalf("no GET …/instances/…/hostnames among the recorded traffic — the hostname read path never ran\nfull traffic:\n%s",
+			fake.trafficDump())
+	}
+
 	// The destroy sequence has an order, not just counts: each
 	// instance's DELETE is followed by at least one GET on the same id
 	// — the wait-gone poll proving the teardown finished.
@@ -552,26 +638,42 @@ data "fluxvale_instance" "b_by_id" {
 
 	// The org and the instance in one apply, in dependency order: the
 	// org POSTs before the first instance POST, and the org DELETE is
-	// last — after every instance DELETE.
-	var orgPost, firstInstancePost, lastInstanceDelete, orgDelete = -1, -1, -1, -1
+	// last — after every instance DELETE. The hostname row is destroyed
+	// before the instance its state references — Terraform's
+	// dependency edge orders the teardown; the platform would cascade
+	// the row anyway, but the provider must ask first.
+	var orgPost, firstInstancePost, lastInstanceDelete, orgDelete, instanceBDelete, hostnameDelete = -1, -1, -1, -1, -1, -1
 	for i, r := range fake.all() {
 		switch {
 		case r.method == "POST" && r.path == "/api/v1/organizations" && orgPost < 0:
 			orgPost = i
 		case r.method == "POST" && r.path == "/api/v1/instances" && firstInstancePost < 0:
 			firstInstancePost = i
+		// inst-2's own DELETE is the more specific case — it wins over
+		// the subtree prefix below (the by-slug-before-subtree rule),
+		// so it must carry that case's bookkeeping too: it feeds BOTH
+		// instanceBDelete and lastInstanceDelete, or the org-last guard
+		// would silently stop covering this DELETE.
+		case r.method == "DELETE" && r.path == "/api/v1/instances/inst-2":
+			instanceBDelete = i
+			lastInstanceDelete = i
 		case r.method == "DELETE" && strings.HasPrefix(r.path, "/api/v1/instances/"):
 			lastInstanceDelete = i
+		case r.method == "DELETE" && strings.HasPrefix(r.path, "/api/v1/instance-hostnames/"):
+			hostnameDelete = i
 		case r.method == "DELETE" && r.path == "/api/v1/organizations/org-1":
 			orgDelete = i
 		}
 	}
-	if orgPost < 0 || firstInstancePost < 0 || lastInstanceDelete < 0 || orgDelete < 0 {
-		t.Fatalf("missing org/instance call: orgPost=%d firstInstancePost=%d lastInstanceDelete=%d orgDelete=%d",
-			orgPost, firstInstancePost, lastInstanceDelete, orgDelete)
+	if orgPost < 0 || firstInstancePost < 0 || lastInstanceDelete < 0 || orgDelete < 0 || instanceBDelete < 0 || hostnameDelete < 0 {
+		t.Fatalf("missing org/instance/hostname call: orgPost=%d firstInstancePost=%d lastInstanceDelete=%d orgDelete=%d instanceBDelete=%d hostnameDelete=%d",
+			orgPost, firstInstancePost, lastInstanceDelete, orgDelete, instanceBDelete, hostnameDelete)
 	}
 	if orgPost > firstInstancePost {
 		t.Errorf("instance POST at %d preceded the org POST at %d — the dependency edge did not order the apply", firstInstancePost, orgPost)
+	}
+	if hostnameDelete > instanceBDelete {
+		t.Errorf("hostname DELETE at %d followed the instance b DELETE at %d — the row must be destroyed before the instance its state references", hostnameDelete, instanceBDelete)
 	}
 	if orgDelete < lastInstanceDelete {
 		t.Errorf("org DELETE at %d preceded the last instance DELETE at %d — destroy order is wrong", orgDelete, lastInstanceDelete)
@@ -729,6 +831,17 @@ type smokeFake struct {
 	// instance creates, by config name — the fake's row-id contract
 	// (the smoke module's names are stable)
 	createIDs map[string]string
+
+	// the minted custom hostname rows, by instance id — at most one
+	// exists in this smoke; the list serves it beside the
+	// platform-minted default row, and the remove marks it gone
+	hostnames map[string]smokeHostnameRow
+}
+
+// smokeHostnameRow is one minted custom address: the fake's deterministic
+// row id and the identity it was minted with.
+type smokeHostnameRow struct {
+	id, label, accessDomainID string
 }
 
 type smokePosture struct {
@@ -796,6 +909,7 @@ func newSmokeFake(t *testing.T) *smokeFake {
 		posture:   map[string]*smokePosture{},
 		deleted:   map[string]bool{},
 		createIDs: map[string]string{},
+		hostnames: map[string]smokeHostnameRow{},
 	}
 
 	mux := http.NewServeMux()
@@ -898,13 +1012,28 @@ func newSmokeFake(t *testing.T) *smokeFake {
 		}
 		switch r.Method {
 		case http.MethodGet:
+			// The hostname list is checked BEFORE the deleted-instance
+			// 404: the platform's list is index semantics — a deleted
+			// instance answers 200 [] (its rows cascaded with it),
+			// never a 404. The bare detail below keeps its
+			// 404-on-deleted.
+			if action == "hostnames" {
+				if f.isDeleted(id) {
+					f.json(w, http.StatusOK, `{"data": []}`)
+					return
+				}
+				f.json(w, http.StatusOK, f.hostnameListDoc(id))
+				return
+			}
 			if f.isDeleted(id) {
 				f.json(w, http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`)
 				return
 			}
 			// The backup row keeps its scripted read; instance detail
 			// repeats until the delete marker, but only for a real row
-			// and the bare detail action.
+			// and the bare detail action. The hostname list above is
+			// served WITHOUT the unknown-id error: the platform's list
+			// answers 200 [] for a gone instance — index semantics.
 			if action == "backup-setting" {
 				f.scripted(w, rest)
 				return
@@ -967,6 +1096,56 @@ func newSmokeFake(t *testing.T) *smokeFake {
 			return
 		}
 		f.json(w, http.StatusMethodNotAllowed, `{"errors": [{"title": "Method Not Allowed"}]}`)
+	})
+
+	// The hostname family: the mint rides the instance path (instance_id
+	// never rides the body — the client's contract), and the remove
+	// takes the row id on its own subtree. The mint's row id is
+	// deterministic ("host-" + the instance id), the response echoes the
+	// row it created — the real API's create contract. The remove
+	// deletes the row's state so later lists exclude it, and renders the
+	// row FLAT — no JSON:API envelope, the real verb's shape.
+	mux.HandleFunc("POST /api/v1/instances/{id}/hostnames", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.record(r, body)
+		instID := r.PathValue("id")
+		label, domain := "git", "dom-smoke-custom"
+		if attrs := fattrsOf(body); attrs != nil {
+			if v, ok := attrs["label"].(string); ok {
+				label = v
+			}
+			if v, ok := attrs["access_domain_id"].(string); ok {
+				domain = v
+			}
+		}
+		row := smokeHostnameRow{id: "host-" + instID, label: label, accessDomainID: domain}
+		f.mu.Lock()
+		f.hostnames[instID] = row
+		f.mu.Unlock()
+		f.json(w, http.StatusCreated, fmt.Sprintf(`{"data": {"id": %q, "type": "instance_hostname", "attributes": {"label": %q, "instance_id": %q, "access_domain_id": %q}}}`,
+			row.id, row.label, instID, row.accessDomainID))
+	})
+	mux.HandleFunc("DELETE /api/v1/instance-hostnames/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.record(r, nil)
+		rowID := r.PathValue("id")
+		f.mu.Lock()
+		instID, label, domain := "", "", ""
+		for id, row := range f.hostnames {
+			if row.id == rowID {
+				instID = id
+				label, domain = row.label, row.accessDomainID
+				delete(f.hostnames, id)
+				break
+			}
+		}
+		f.mu.Unlock()
+		if instID == "" {
+			f.json(w, http.StatusNotFound, `{"errors": [{"title": "Not Found"}]}`)
+			return
+		}
+		f.json(w, http.StatusOK, fmt.Sprintf(`{"id": %q, "label": %q, "instance_id": %q, "access_domain_id": %q}`,
+			rowID, label, instID, domain))
 	})
 
 	// Gateway: singleton read (scripted), create, pairing verbs.
@@ -1370,6 +1549,24 @@ func (f *smokeFake) wantDeleteThenPoll(t *testing.T, ids ...string) {
 			t.Errorf("instance %s: no GET after its DELETE — the wait-gone poll is missing from the destroy sequence", id)
 		}
 	}
+}
+
+// hostnameListDoc renders the instance's hostname list — the
+// platform-minted default row (label = the instance's slug, the
+// platform domain) plus the custom row when it stands. A gone or
+// unknown instance answers an empty collection — index semantics, never
+// a 404. The provider must skip the default row: it matches its own
+// row id, not the label.
+func (f *smokeFake) hostnameListDoc(instanceID string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rows := fmt.Sprintf(`{"id": "host-default-%s", "type": "instance_hostname", "attributes": {"label": "velvety-otter-%s", "instance_id": %q, "access_domain_id": "dom-smoke-platform"}}`,
+		instanceID, strings.TrimPrefix(instanceID, "inst-"), instanceID)
+	if row, ok := f.hostnames[instanceID]; ok {
+		rows += fmt.Sprintf(`, {"id": %q, "type": "instance_hostname", "attributes": {"label": %q, "instance_id": %q, "access_domain_id": %q}}`,
+			row.id, row.label, instanceID, row.accessDomainID)
+	}
+	return `{"data": [` + rows + `]}`
 }
 
 // instanceDoc renders the detail surface the client parses — INCLUDING
