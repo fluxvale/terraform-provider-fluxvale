@@ -145,6 +145,49 @@ func TestAccessDomainShapeDriftIsAnError(t *testing.T) {
 	}
 }
 
+// The org's domain list — the acceptance test's domain picker. The
+// platform row rides alongside the custom ones; the shape-drift arm
+// proves a drifted row errors naming the field.
+func TestListAccessDomainsDecodes(t *testing.T) {
+	var gotPath string
+	srv := handlerServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		fmt.Fprint(w, `{"data": [
+			{"id": "dom-platform", "type": "access_domain", "attributes": {
+				"domain": "fluxvale.app", "kind": "platform", "state": "verified", "organization_id": "org-1"}},
+			{"id": "dom-1", "type": "access_domain", "attributes": {
+				"domain": "apps.customer.com", "kind": "custom", "state": "pending", "organization_id": "org-1"}}]}`)
+	}))
+
+	c := New(srv.URL, "fvpat_test", "test", srv.Client())
+	domains, err := c.ListAccessDomains(context.Background(), "org-1")
+	if err != nil {
+		t.Fatalf("ListAccessDomains: %v", err)
+	}
+
+	if gotPath != "/api/v1/organizations/org-1/access-domains" {
+		t.Errorf("path = %q, want /api/v1/organizations/org-1/access-domains", gotPath)
+	}
+	if len(domains) != 2 {
+		t.Fatalf("rows = %d, want 2", len(domains))
+	}
+	if domains[0].ID != "dom-platform" || domains[0].Domain != "fluxvale.app" || domains[0].Kind != "platform" || domains[0].State != "verified" || domains[0].OrganizationID != "org-1" {
+		t.Errorf("row 0 = %+v, want the platform row", domains[0])
+	}
+	if domains[1].ID != "dom-1" || domains[1].Domain != "apps.customer.com" || domains[1].Kind != "custom" || domains[1].State != "pending" || domains[1].OrganizationID != "org-1" {
+		t.Errorf("row 1 = %+v, want the custom row", domains[1])
+	}
+
+	missingState := `{"data": [{"id": "dom-1", "type": "access_domain", "attributes": {
+		"domain": "apps.customer.com", "kind": "custom", "organization_id": "org-1"}}]}`
+	srv2 := testServer(t, http.StatusOK, missingState)
+	c2 := New(srv2.URL, "fvpat_test", "test", srv2.Client())
+
+	if _, err := c2.ListAccessDomains(context.Background(), "org-1"); err == nil || !strings.Contains(err.Error(), "state") {
+		t.Fatalf("err = %v, want the state shape-drift error", err)
+	}
+}
+
 // The teardown DELETE: the 200 renders the row flat (the generic
 // action's shape — no JSON:API envelope), which decodes harmlessly.
 func TestDeleteAccessDomainFlatBody(t *testing.T) {
