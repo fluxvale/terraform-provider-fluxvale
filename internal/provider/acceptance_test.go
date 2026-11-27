@@ -50,6 +50,14 @@ import (
 //	                          auth_keys, dns, devices:routes write,
 //	                          devices:core:read — and the fluxvale-gateway tag)
 //	TF_ACC_DOMAIN             optional — the custom-domain test skips without it
+//	TF_ACC_HOSTNAME_DOMAIN    optional — the instance-hostname class skips
+//	                          without it; it names a standing VERIFIED custom
+//	                          domain in the org (not the pending row the
+//	                          TF_ACC_DOMAIN class registers and destroys per
+//	                          run); the token needs instances:write (implies
+//	                          read — mint, list, remove) and gateways:read
+//	                          (via gateways:write — the domain-list resolver
+//	                          the precheck drives)
 //	TF_ACC_POCKET_ID_INSTANCE_ID
 //	                          optional — the PocketID SSO test skips without it; it
 //	                          names a custody-ready public PocketID instance in the
@@ -1026,4 +1034,248 @@ resource "fluxvale_instance" "sso" {
 			},
 		},
 	})
+}
+
+// TestAccInstanceHostname exercises the custom-address lifecycle on
+// the real wire: mint under the org's standing verified domain, read
+// back, remove while the instance lives (the step boundary destroy),
+// re-mint, and import by the two-part id. Skips as a class without
+// TF_ACC_HOSTNAME_DOMAIN — the name of a VERIFIED custom domain
+// standing in the staging org (the nightly's TF_ACC_DOMAIN class
+// registers and destroys a fresh pending row, which the mint refuses;
+// a standing verified domain is a one-time runbook prerequisite).
+//
+// Runbook — the platform administrator's by-hand run (this class
+// never runs per-PR; the nightly carries it once the secret lands):
+//
+//	export TF_ACC=1
+//	export TF_ACC_API_URL=https://staging.fluxvale.com
+//	export TF_ACC_PAT=<the six-scope staging token>
+//	export TF_ACC_HOSTNAME_DOMAIN=<the standing verified domain's NAME, e.g. apps.staging.example.com>
+//	export TF_ACC_PROVIDER_NAMESPACE=hashicorp        # plugin-testing registers the in-process
+//	export TF_ACC_PROVIDER_HOST=registry.opentofu.org # provider under its default address; tofu resolves
+//	                                                  # the implicit provider against registry.opentofu.org
+//	export TF_ACC_TERRAFORM_PATH="$(mise which tofu)"
+//	export TF_ACC_TERRAFORM_VERSION="$(mise x -- tofu version | head -1 | sed 's/^OpenTofu v//')"
+//	mise x -- go test ./internal/provider -run TestAccInstanceHostname -count=1 -v
+//
+// The token needs the instances:write and gateways:write scopes (the
+// six-scope staging token carries both). The prerequisite is one-time
+// platform-administrator setup: one verified custom domain standing
+// in the staging org — register it, delegate the _acme-challenge
+// CNAME at the DNS host with proxied = false (the
+// fluxvale_domain_delegation data source renders it), and wait out
+// the observer's ~15-minute pass. The standing domain is reused by
+// every run of this class and never destroyed by it.
+func TestAccInstanceHostname(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set — the acceptance lane runs nightly/tags/dispatch, never per-PR (wallet cost)")
+	}
+	if !accHasResource("fluxvale_instance_hostname") {
+		t.Skip("fluxvale_instance_hostname is not registered in this provider build")
+	}
+	accSkip(t, "instance hostname", "TF_ACC_HOSTNAME_DOMAIN")
+
+	// The label is lowercase alnum + hyphens and unique per run: the
+	// platform refuses a duplicate (access_domain_id, label), and a
+	// prior run's leftover row must never read as this run's
+	// duplicate. One label serves the whole class — step 3 removes
+	// the row before step 4 re-mints it.
+	label := fmt.Sprintf("acc-%d", time.Now().UnixNano())
+	// The verified domain's access-domain id, resolved per class
+	// (never per step): the config interpolates it, and PreCheck
+	// re-asserts it fail-loud against the live org.
+	domainID := accHostnameDomainID(t)
+
+	// The class's instance — the TestAccInstanceTwoSizes shape (the
+	// catalog resolves the version, small allocation), pinned public:
+	// the custom address serves the public edge.
+	instanceConfig := accVarDecls + fmt.Sprintf(`
+data "fluxvale_app_versions" "test" {
+  app = %q
+}
+
+resource "fluxvale_instance" "h" {
+  name        = "acc-hostname"
+  app         = %q
+  app_version = data.fluxvale_app_versions.test.app_versions[0].version
+  cpu_cores   = 0.5
+  memory_mb   = 256
+  storage_gb  = 1
+  exposure    = "public"
+}
+`, accAppSlug(), accAppSlug())
+
+	hostnameConfig := instanceConfig + fmt.Sprintf(`
+resource "fluxvale_instance_hostname" "h" {
+  instance_id      = fluxvale_instance.h.id
+  access_domain_id = %q
+  label            = %q
+}
+`, domainID, label)
+
+	// The step-boundary destroy of ONLY the address, proved
+	// mid-flight: the provider's DELETE ran while the instance
+	// stands — no row carries the label, and the instance still
+	// answers (a gone instance would make the list trivially empty).
+	checkAddressRemoved := func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources["fluxvale_instance.h"]
+		if !ok {
+			return fmt.Errorf("fluxvale_instance.h is not in state")
+		}
+		c := accClient(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if _, err := c.GetInstance(ctx, rs.Primary.ID); err != nil {
+			return fmt.Errorf("instance %s disappeared while removing only the address: %w", rs.Primary.ID, err)
+		}
+		rows, err := c.ListInstanceHostnames(ctx, rs.Primary.ID)
+		if err != nil {
+			return fmt.Errorf("listing the addresses of instance %s: %w", rs.Primary.ID, err)
+		}
+		for _, row := range rows {
+			if row.Label == label {
+				return fmt.Errorf("address %s (label %s) still exists on instance %s after the step-boundary destroy", row.ID, row.Label, rs.Primary.ID)
+			}
+		}
+		return nil
+	}
+
+	// The create/read/re-mint assertions: the identity reads back
+	// exactly as minted, and the row id is non-empty.
+	hostnameChecks := resource.ComposeTestCheckFunc(
+		resource.TestCheckResourceAttr("fluxvale_instance_hostname.h", "label", label),
+		resource.TestCheckResourceAttrPair("fluxvale_instance_hostname.h", "instance_id", "fluxvale_instance.h", "id"),
+		resource.TestCheckResourceAttr("fluxvale_instance_hostname.h", "access_domain_id", domainID),
+		resource.TestCheckResourceAttrSet("fluxvale_instance_hostname.h", "id"),
+	)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: accProtoV6(),
+		PreCheck: func() {
+			accPreCheck(t)
+			accHostnameDomainID(t)
+		},
+		CheckDestroy: func(s *terraform.State) error {
+			// The instance's own destroy cascades its address rows (the
+			// platform deletes hostnames with their instance), so by the
+			// final state this is trivially true — unless the destroy
+			// ordering broke and a row outlived its instance. The
+			// isolated remove proof is step 3's mid-flight check, not
+			// this.
+			c := accClient(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			for addr, rs := range s.RootModule().Resources {
+				if rs.Type != "fluxvale_instance_hostname" {
+					continue
+				}
+				instanceID := rs.Primary.Attributes["instance_id"]
+				rows, err := c.ListInstanceHostnames(ctx, instanceID)
+				if err != nil {
+					return fmt.Errorf("listing the addresses of instance %s: %w", instanceID, err)
+				}
+				for _, row := range rows {
+					if row.ID == rs.Primary.ID {
+						return fmt.Errorf("instance hostname %s (%s) still exists after destroy", rs.Primary.ID, addr)
+					}
+				}
+			}
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{
+				// Create + read: the mint under the verified domain.
+				Config:          hostnameConfig,
+				ConfigVariables: accVars(t),
+				Check:           hostnameChecks,
+			},
+			{
+				// Refresh consistency: the same config re-applies with
+				// nothing to do — the read round-trips the row.
+				Config:          hostnameConfig,
+				ConfigVariables: accVars(t),
+				Check:           hostnameChecks,
+			},
+			{
+				// Remove while the instance lives: the config drops ONLY
+				// the hostname resource, so the step boundary's destroy
+				// is the real remove proof.
+				Config:          instanceConfig,
+				ConfigVariables: accVars(t),
+				Check:           checkAddressRemoved,
+			},
+			{
+				// Re-mint: re-create after removal — the
+				// plan-that-rebuilds promise.
+				Config:          hostnameConfig,
+				ConfigVariables: accVars(t),
+				Check:           hostnameChecks,
+			},
+			{
+				// Import by the two-part id: the read surface is
+				// instance-scoped (there is no GET by hostname id), so
+				// the id is <instance_id>/<hostname_id> — a bare
+				// ImportState would pass only the row id, which the
+				// parser refuses. (The org class's bare import step is
+				// the currently-red shape; do not repeat it.)
+				ResourceName:      "fluxvale_instance_hostname.h",
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateIdFunc: func(s *terraform.State) (string, error) {
+					instanceRS, ok := s.RootModule().Resources["fluxvale_instance.h"]
+					if !ok {
+						return "", fmt.Errorf("fluxvale_instance.h is not in state")
+					}
+					hostnameRS, ok := s.RootModule().Resources["fluxvale_instance_hostname.h"]
+					if !ok {
+						return "", fmt.Errorf("fluxvale_instance_hostname.h is not in state")
+					}
+					return instanceRS.Primary.ID + "/" + hostnameRS.Primary.ID, nil
+				},
+			},
+		},
+	})
+}
+
+// accHostnameDomainID resolves TF_ACC_HOSTNAME_DOMAIN to its
+// access-domain id — fail loud, never skip (accPreCheck's stance: a
+// nightly that proves nothing must RED, not green-skip). The staging
+// user is single-org by design; the named domain must stand in that
+// org and be verified — the mint refuses a pending or unverified one.
+func accHostnameDomainID(t *testing.T) string {
+	t.Helper()
+	c := accClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	orgs, err := c.ListOrganizations(ctx)
+	if err != nil {
+		t.Fatalf("listing the organizations: %v", err)
+	}
+	if len(orgs) != 1 {
+		t.Fatalf("want exactly one organization (the staging user is single-org by design), got %d — "+
+			"point TF_ACC_PAT at the staging token", len(orgs))
+	}
+	domains, err := c.ListAccessDomains(ctx, orgs[0].ID)
+	if err != nil {
+		t.Fatalf("listing the org %s's access domains: %v", orgs[0].ID, err)
+	}
+	want := os.Getenv("TF_ACC_HOSTNAME_DOMAIN")
+	names := make([]string, 0, len(domains))
+	for _, d := range domains {
+		if d.Domain == want {
+			if d.State != "verified" {
+				t.Fatalf("domain %s stands in the org but its state is %q, want \"verified\" — the mint refuses an "+
+					"unverified domain. Finish the one-time setup: delegate the _acme-challenge CNAME at the DNS "+
+					"host with proxied = false (the fluxvale_domain_delegation data source renders it), then wait "+
+					"out the observer's ~15-minute pass.", want, d.State)
+			}
+			return d.ID
+		}
+		names = append(names, d.Domain)
+	}
+	t.Fatalf("domain %q does not stand in the org — its domains are: %s. TF_ACC_HOSTNAME_DOMAIN names a standing "+
+		"VERIFIED custom domain (not the pending row the TF_ACC_DOMAIN class registers per run); register it per "+
+		"the class's runbook.", want, strings.Join(names, ", "))
+	return ""
 }
